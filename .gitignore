@@ -1,0 +1,13 @@
+# Godot
+.godot/
+builds/
+*.apk
+*.idsig
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+*.tmp
+*~

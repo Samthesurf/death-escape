@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Predators rig preview</title>
+<style>
+  body{background:#20242a;color:#e8e4da;font-family:sans-serif;margin:0;padding:18px}
+  h2{margin:6px 0 2px} p{color:#b9b4a8;font-size:13px}
+  .scene{position:relative;width:680px;height:300px;overflow:hidden;background:#f6f1e3;
+    background-image:repeating-linear-gradient(to bottom,transparent 0 27px,#9db3d4 27px 28px);
+    border:1px solid #555;margin:10px 0 22px}
+  .ground{position:absolute;left:0;right:0;height:4px;background:#2e2c28}
+  .pebbles{position:absolute;left:0;right:0;height:10px;
+    background-image:repeating-linear-gradient(to right,#2e2c28 0 14px,transparent 14px 46px,#2e2c28 46px 52px,transparent 52px 96px);}
+  svg.mob{position:absolute}
+  .btnrow{margin:4px 0 18px;display:flex;gap:10px;align-items:center}
+  button{background:#3a3f47;color:#fff;border:1px solid #666;padding:5px 14px;cursor:pointer}
+</style></head><body>
+<h2>Hound (gallop)</h2>
+<p>Live rig, same pencil hand as the runner. Lunge, gather, hind push, flight tuck.</p>
+<div class="scene">
+  <svg class="mob" id="hound" width="680" height="300" style="left:0;bottom:0"></svg>
+  <div class="ground" style="bottom:30px"></div>
+  <div class="pebbles" id="pebbles" style="bottom:14px"></div>
+</div>
+<h2>Bird (flap)</h2>
+<p>Upstroke, downstroke, glide. Near wing dark, far wing light.</p>
+<div class="scene">
+  <svg class="mob" id="bird" width="680" height="300" style="left:0;top:0"></svg>
+</div>
+<div class="btnrow">
+  <button id="pp">Pause</button>
+  <label style="font-size:12px">fps <input id="fps" type="range" min="4" max="16" value="9" step="1"><span id="fpsv">9</span></label>
+</div>
+<script>
+const INK='#2e2c28';
+function el(n,a,p){const e=document.createElementNS('http://www.w3.org/2000/svg',n);for(const k in a)e.setAttribute(k,a[k]);p.appendChild(e);return e;}
+function lerp(a,b,t){return a+(b-a)*t;}
+// fixed-seed wobble: identical every frame, never boils
+function wobbler(){let s=7;const r=()=>{s=(s*1103515245+12345)&0x7fffffff;return s/0x7fffffff*2-1;};
+  return (par,A,B,w,op)=>{const dx=B[0]-A[0],dy=B[1]-A[1],l=Math.hypot(dx,dy)||1,nx=-dy/l,ny=dx/l;
+    const P=[A,[A[0]*.75+B[0]*.25+nx*r(),A[1]*.75+B[1]*.25+ny*r()],[A[0]*.25+B[0]*.75+nx*r(),A[1]*.25+B[1]*.75+ny*r()],B];
+    el('polyline',{points:P.map(p=>p[0].toFixed(1)+','+p[1].toFixed(1)).join(' '),fill:'none',stroke:INK,'stroke-width':w,'stroke-linecap':'round','stroke-linejoin':'round',opacity:op==null?1:op},par);};}
+// ---------- HOUND ----------
+const HK=[
+ {pitch:3, bob:0,  fT:32, fK:18, hT:-32,hK:22, neck:-24,tail:32},
+ {pitch:0, bob:-8, fT:-8, fK:45, hT:12, hK:55, neck:-12,tail:20},
+ {pitch:-3,bob:0,  fT:-36,fK:28, hT:36, hK:14, neck:-28,tail:38},
+ {pitch:0, bob:-10,fT:12, fK:65, hT:-14,hK:75, neck:-14,tail:24}];
+function hpose(t){t=((t%4)+4)%4;const i=Math.floor(t),f=t-i,A=HK[i],B=HK[(i+1)%4],o={};for(const k in A)o[k]=lerp(A[k],B[k],f);return o;}
+function drawHound(svg,T){
+  while(svg.firstChild)svg.removeChild(svg.firstChild);
+  const W=wobbler(), gy=270, cx=340, p=hpose(T);
+  const by=gy-72+p.bob, pr=p.pitch*Math.PI/180;
+  const hx=cx-Math.cos(pr)*45, hy=by+Math.sin(pr)*45;      // hips (rear)
+  const sx=cx+Math.cos(pr)*45, sy=by-Math.sin(pr)*45;      // shoulders (front)
+  function leg(px,py,th,kn,U,L){
+    const a=th*Math.PI/180,k=kn*Math.PI/180;
+    const kx=px+Math.sin(a)*U, ky=py+Math.cos(a)*U, sa=a-k;
+    return {k:[kx,ky],f:[kx+Math.sin(sa)*L,ky+Math.cos(sa)*L]};
+  }
+  // auto-ground on the lowest foot
+  const f0=leg(sx,sy,p.fT,p.fK,42,40), h0=leg(hx,hy,p.hT,p.hK,42,40);
+  const low=Math.max(f0.f[1],h0.f[1]), sh=gy-low;
+  const S=[sx,sy+sh], H=[hx,hy+sh];
+  const F=leg(S[0],S[1],p.fT,p.fK,42,40), Hd=leg(H[0],H[1],p.hT,p.hK,42,40);
+  // far legs (lighter, slightly behind)
+  const g0=el('g',{opacity:.55},svg);
+  const Ff=leg(S[0]-6,S[1],p.fT-8,p.fK,40,38), Hf=leg(H[0]-6,H[1],p.hT-8,p.hK,40,38);
+  W(g0,H,[Hf.k[0],Hf.k[1]],3.2,.55); W(g0,Hf.k,Hf.f,3.2,.55);
+  W(g0,S,[Ff.k[0],Ff.k[1]],3.2,.55); W(g0,Ff.k,Ff.f,3.2,.55);
+  // tail: two segments up-back
+  const ta=(p.tail)*Math.PI/180;
+  const t1=[H[0]-Math.cos(ta)*22,H[1]-Math.sin(ta)*22], t2=[t1[0]-Math.cos(ta-.5)*22,t1[1]-Math.sin(ta-.5)*22-6];
+  W(svg,H,t1,3); W(svg,t1,t2,2.6);
+  // body
+  W(svg,H,S,4);
+  // near legs
+  W(svg,H,Hd.k,3.4); W(svg,Hd.k,Hd.f,3.4);
+  W(svg,S,F.k,3.4);  W(svg,F.k,F.f,3.4);
+  for(const Ft of [F.f,Hd.f]) el('line',{x1:Ft[0]-5,y1:Ft[1],x2:Ft[0]+5,y2:Ft[1],stroke:INK,'stroke-width':3},svg);
+  // neck + head: circle, snout, ear, angry eye
+  const na=p.neck*Math.PI/180;
+  const nx=S[0]+Math.cos(na)*26, ny=S[1]+Math.sin(na)*22-8;
+  W(svg,S,[nx,ny],3.4);
+  el('circle',{cx:nx+8,cy:ny-8,r:11,fill:'none',stroke:INK,'stroke-width':3.2},svg);
+  W(svg,[nx+16,ny-6],[nx+32,ny-1],3);                       // snout
+  el('polyline',{points:(nx-2)+','+(ny-17)+' '+(nx+2)+','+(ny-28)+' '+(nx+8)+','+(ny-18),fill:'none',stroke:INK,'stroke-width':2.6,'stroke-linecap':'round','stroke-linejoin':'round'},svg); // ear
+  el('line',{x1:nx+6,y1:ny-10,x2:nx+13,y2:ny-8,stroke:INK,'stroke-width':2},svg); // eye slash
+  el('circle',{cx:H[0],cy:H[1],r:3,fill:INK,stroke:'none'},svg);
+}
+// ---------- BIRD ----------
+const BK=[{w:62,e:20,bob:-10,pitch:-4},{w:10,e:45,bob:4,pitch:2},{w:-52,e:25,bob:8,pitch:5},{w:-8,e:50,bob:-2,pitch:0}];
+function bpose(t){t=((t%4)+4)%4;const i=Math.floor(t),f=t-i,A=BK[i],B=BK[(i+1)%4],o={};for(const k in A)o[k]=lerp(A[k],B[k],f);return o;}
+function drawBird(svg,T){
+  while(svg.firstChild)svg.removeChild(svg.firstChild);
+  const W=wobbler(), cx=340, p=bpose(T), cy=130+p.bob;
+  const pr=p.pitch*Math.PI/180;
+  const bx=cx-Math.cos(pr)*34, by=cy+Math.sin(pr)*34;   // tail root
+  const hx=cx+Math.cos(pr)*40, hy=cy-Math.sin(pr)*40;   // head end
+  function wing(shx,shy,side,sc){
+    const a=(side*p.w)*Math.PI/180, e=p.e*Math.PI/180;
+    const U=52*sc, F=56*sc;
+    const wx=shx-Math.cos(a)*U, wy=shy-Math.sin(a)*U*side;
+    const sa=a+e*side*.6;
+    const tx=wx-Math.cos(sa)*F, ty=wy-Math.sin(sa)*F*side;
+    return {w:[wx,wy],t:[tx,ty]};
+  }
+  // far wing first
+  const Fw=wing(cx-8,cy,-1,.8);
+  W(svg,[cx-8,cy],Fw.w,3,.5); W(svg,Fw.w,Fw.t,2.8,.5);
+  // tail fan
+  W(svg,[bx,by],[bx-30,by-8],3); W(svg,[bx,by],[bx-32,by+2],3); W(svg,[bx,by],[bx-28,by+10],3);
+  // body
+  W(svg,[bx,by],[hx,hy],3.8);
+  // head + beak
+  el('circle',{cx:hx+8,cy:hy-4,r:10,fill:'none',stroke:INK,'stroke-width':3.2},svg);
+  el('polyline',{points:(hx+16)+','+(hy-3)+' '+(hx+28)+','+(hy+1)+' '+(hx+16)+','+(hy+4),fill:'none',stroke:INK,'stroke-width':2.6,'stroke-linecap':'round','stroke-linejoin':'round'},svg);
+  el('circle',{cx:hx+9,cy:hy-6,r:1.6,fill:INK,stroke:'none'},svg);
+  // near wing
+  const Nw=wing(cx,cy,1,1);
+  W(svg,[cx,cy],Nw.w,3.4); W(svg,Nw.w,Nw.t,3);
+  el('circle',{cx:Nw.w[0],cy:Nw.w[1],r:2.4,fill:INK,stroke:'none'},svg);
+}
+// ---------- loop ----------
+const hs=document.getElementById('hound'), bs=document.getElementById('bird');
+let T=0,playing=true,fps=9,sc=0,last=performance.now();
+function tick(now){
+  const dt=Math.min(.05,(now-last)/1000); last=now;
+  if(playing){T+=dt*fps; sc+=dt*220;
+    document.getElementById('pebbles').style.backgroundPositionX=(-sc%96)+'px';}
+  drawHound(hs,T); drawBird(bs,T*.8);
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+document.getElementById('pp').onclick=e=>{playing=!playing;e.target.textContent=playing?'Pause':'Play';};
+document.getElementById('fps').oninput=e=>{fps=+e.target.value;document.getElementById('fpsv').textContent=fps;};
+</script></body></html>
