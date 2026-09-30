@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
+<!-- drive_seated: same ink + weights as run_1_R_contact, hip kept at 92,112 for clean swap -->
+<!-- far limbs (grey ghost, opacity 0.62) -->
+<polyline points="100.0,64.0 116.0,80.0 136.0,90.0" fill="none" stroke="#2e2c28" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round" opacity="0.62"/>
+<polyline points="92.0,112.5 118.0,118.0 118.0,150.0" fill="none" stroke="#2e2c28" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round" opacity="0.62"/>
+<polyline points="118.0,150.0 126.0,150.5 134.0,150.0" fill="none" stroke="#2e2c28" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" opacity="0.62"/>
+<!-- near torso -->
+<polyline points="92.0,112.5 96.0,88.0 100.0,64.0" fill="none" stroke="#2e2c28" stroke-width="3.8" stroke-linecap="round" stroke-linejoin="round" />
+<!-- near arm: shoulder -> elbow -> grip -->
+<polyline points="100.0,64.0 120.0,78.0 140.0,88.0" fill="none" stroke="#2e2c28" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round" />
+<!-- near leg: hip -> knee -> ankle -->
+<polyline points="92.0,112.5 124.0,114.0 126.0,148.0" fill="none" stroke="#2e2c28" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round" />
+<polyline points="126.0,148.0 133.0,148.2 140.0,148.0" fill="none" stroke="#2e2c28" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
+<!-- joints + grip hands -->
+<circle cx="120.0" cy="78.0" r="2.6" fill="#2e2c28"/>
+<circle cx="140.0" cy="88.0" r="2.6" fill="#2e2c28"/>
+<circle cx="92.0" cy="112.5" r="3" fill="#2e2c28"/>
+<!-- head: hollow circle, same r=12 w=3.4 -->
+<circle cx="97.0" cy="50.0" r="12" fill="none" stroke="#2e2c28" stroke-width="3.4"/>
+</svg>
