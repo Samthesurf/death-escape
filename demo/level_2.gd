@@ -1,5 +1,7 @@
 extends Node2D
-## Level 1: survive 105 seconds, reach the gold.
+## Level 2: the hound. Same run, but something gains on him from behind.
+## Drop walls to slow it (each stroke costs it 2 seconds), or outrun it
+## in a car. Rocks sit tighter, one archer still watches the middle.
 ## Draw ramps (climb rocks), shields (block arrows, wear out), and CARS:
 ## a closed loop becomes a drivable hull. The stick hops in, drives it at
 ## ~320 px/s, and takes the hits in the hull instead of his chest.
@@ -23,9 +25,14 @@ const SPEED := 240.0
 const ARROW_SPEED := 520.0
 const RUNNER_X := 300.0
 const PLAT0 := 4500.0
-# denser than before: something to deal with every ~8s, coins fill the gaps
-const ROCK_XS := [2500.0, 4500.0, 6500.0, 8500.0, 10500.0, 12500.0, 14500.0, 16500.0]
-const COIN_XS := [3500.0, 5500.0, 7500.0, 9500.0, 11500.0, 13500.0, 15500.0]
+# tighter obstacle cadence than level 1; keep coins between challenge beats
+const ROCK_XS := [1800.0, 3400.0, 5000.0, 6600.0, 8200.0, 9800.0, 11400.0, 13000.0, 14600.0, 16200.0, 17800.0]
+const COIN_XS := [2600.0, 4200.0, 5800.0, 7400.0, 9000.0, 10600.0, 12200.0, 13800.0, 15400.0, 17000.0]
+
+# ---------- hound tuning: gains ~8px/s, catches a naked run at ~70s ----------
+const HOUND_SPEED := 248.0
+const HOUND_SPAWN_GAP := 560.0
+const HOUND_CATCH := 44.0
 
 # ---------- car tuning ----------
 const LOOP_CLOSE_DIST := 60.0
@@ -124,6 +131,16 @@ var arrows: Array = []
 var rocks: Array = [] # each {node}
 var rock_timer := 4.0
 
+# hound state
+var hound: AnimatedSprite2D
+var hound_spawned := false
+var hound_base_y := 0.0
+var hound_pause := 0.0
+var hound_bite_cd := 0.0
+var howl_t := 8.0
+var hud_hound: Label
+var sfx_howl: AudioStreamPlayer
+
 var gold: Sprite2D
 var gold_spawned := false
 var hug: AnimatedSprite2D
@@ -169,6 +186,23 @@ func _frames(paths: Array, fps: float) -> SpriteFrames:
 			continue
 		sf.add_frame("default", tex)
 	return sf
+
+func _sprite_bottom_offset(frames: SpriteFrames, scale_y: float) -> float:
+	var bottom_offset := 0.0
+	for frame_idx in frames.get_frame_count("default"):
+		var texture := frames.get_frame_texture("default", frame_idx)
+		if texture == null:
+			continue
+		var image := texture.get_image()
+		if image == null:
+			continue
+		var used := image.get_used_rect()
+		if used.size.y <= 0:
+			continue
+		var pixel_bottom := float(used.position.y + used.size.y)
+		var image_center_y := float(image.get_height()) * 0.5
+		bottom_offset = maxf(bottom_offset, (pixel_bottom - image_center_y) * scale_y)
+	return bottom_offset
 
 func _loop_wav(path: String) -> AudioStreamWAV:
 	var w := load(path) as AudioStreamWAV
@@ -326,6 +360,19 @@ func _ready() -> void:
 	shadow.color = Color(0.18, 0.17, 0.15, 0.20)
 	shadow.z_index = -2
 	add_child(shadow)
+	# the hound: hidden until it spawns a few seconds in
+	hound = AnimatedSprite2D.new()
+	hound.sprite_frames = _frames([
+		"res://assets/predators/hound/cycle/f1_lunge_base.png",
+		"res://assets/predators/hound/cycle/f2_gallop_stretch.png",
+		"res://assets/predators/hound/cycle/f3_suspension_air.png",
+		"res://assets/predators/hound/cycle/f4_landing_reach.png",
+	], 9.0)
+	hound.scale = Vector2(-0.75, 0.75) # art faces left, he runs right
+	hound.visible = false
+	add_child(hound)
+	# Anchor the lowest opaque paw pixels to the floor, not the frame center.
+	hound_base_y = GROUND_Y - _sprite_bottom_offset(hound.sprite_frames, hound.scale.y)
 	# sky platform (drops in as the runner closes in), high enough that
 	# even a tall car + rider passes under
 	block_tex = _cut("res://assets/obstacles/cut/block.png")
@@ -371,6 +418,7 @@ func _ready() -> void:
 	sfx_board = _player(load("res://assets/sfx/board_thunk.wav") as AudioStream, -6.0)
 	sfx_crash = _player(load("res://assets/sfx/crash_break.wav") as AudioStream, -6.0)
 	sfx_coin = _player(load("res://assets/sfx/coin_blip.wav") as AudioStream, -8.0)
+	sfx_howl = _player(load("res://assets/sfx/wolf_howl.wav") as AudioStream, -12.0)
 	sfx_roll.play()
 	sfx_wind.play()
 	_start_run_music()
@@ -415,8 +463,20 @@ func _ready() -> void:
 	hud_prog_fill.position = Vector2(W * 0.5 - 150, 62)
 	hud_prog_fill.size = Vector2(4, 8)
 	ui.add_child(hud_prog_fill)
+	# hound gap meter, top right
+	hud_hound = Label.new()
+	hud_hound.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hud_hound.add_theme_font_size_override("font_size", 26)
+	hud_hound.add_theme_color_override("font_color", INK)
+	hud_hound.anchor_left = 1.0
+	hud_hound.anchor_right = 1.0
+	hud_hound.offset_left = -260.0
+	hud_hound.offset_top = 10.0
+	hud_hound.offset_right = -16.0
+	hud_hound.text = ""
+	ui.add_child(hud_hound)
 	var hint := Label.new()
-	hint.text = "Draw: ramp, LOOP = car. Erase removes one stroke. Clear All = C."
+	hint.text = "Draw ramps, LOOP = car. Erase removes one stroke. Clear All = C."
 	hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	hint.add_theme_font_size_override("font_size", 18)
 	hint.add_theme_color_override("font_color", INK)
@@ -424,7 +484,7 @@ func _ready() -> void:
 	ui.add_child(hint)
 	# story card, fades after a few seconds
 	title_lbl = Label.new()
-	title_lbl.text = "He saw the bag. RUN."
+	title_lbl.text = "The dogs smelled it. RUN."
 	title_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	title_lbl.add_theme_font_size_override("font_size", 52)
 	title_lbl.add_theme_color_override("font_color", INK)
@@ -470,7 +530,7 @@ func _ready() -> void:
 	restart_btn.custom_minimum_size = Vector2(100, 56)
 	restart_btn.pressed.connect(_on_restart_btn)
 	bar.add_child(restart_btn)
-	print("level1 ready: survive %.0f seconds" % level_time)
+	print("level2 ready: the hound is coming, survive %.0f seconds" % level_time)
 
 func _on_move_toggle() -> void:
 	move_mode = move_btn.button_pressed
@@ -498,6 +558,14 @@ func _on_clear_btn() -> void:
 func _on_restart_btn() -> void:
 	Engine.time_scale = 1.0
 	get_tree().reload_current_scene()
+
+func _on_level_select_pressed() -> void:
+	Engine.time_scale = 1.0
+	get_tree().root.set_meta(LEVEL_PICKER_META, true)
+	var change_error := get_tree().change_scene_to_file(TITLE_SCREEN_PATH)
+	if change_error != OK:
+		get_tree().root.remove_meta(LEVEL_PICKER_META)
+		push_error("Could not return to level selection: " + str(change_error))
 
 # ---------- drawing: ramps + shields + cars, all with durability ----------
 func _unhandled_input(event: InputEvent) -> void:
@@ -1196,7 +1264,7 @@ func _stars() -> int:
 		return 2
 	return 1
 
-func _show_end(title: String, sub: String, sad: bool, next_scene: String = "") -> void:
+func _show_end(title: String, sub: String, sad: bool) -> void:
 	overlay = Control.new()
 	overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
 	var dim := ColorRect.new()
@@ -1222,14 +1290,6 @@ func _show_end(title: String, sub: String, sad: bool, next_scene: String = "") -
 	again.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	again.pressed.connect(_on_restart_btn)
 	vbox.add_child(again)
-	if next_scene != "" and not sad:
-		var next_btn := Button.new()
-		next_btn.text = "Next Level"
-		next_btn.custom_minimum_size = Vector2(240, 64)
-		next_btn.add_theme_font_size_override("font_size", 30)
-		next_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-		next_btn.pressed.connect(_on_next_btn.bind(next_scene))
-		vbox.add_child(next_btn)
 	var level_select_btn := Button.new()
 	level_select_btn.text = "Choose Level"
 	level_select_btn.custom_minimum_size = Vector2(260, 64)
@@ -1238,18 +1298,6 @@ func _show_end(title: String, sub: String, sad: bool, next_scene: String = "") -
 	level_select_btn.pressed.connect(_on_level_select_pressed)
 	vbox.add_child(level_select_btn)
 	ui.add_child(overlay)
-
-func _on_next_btn(next_scene: String) -> void:
-	Engine.time_scale = 1.0
-	get_tree().change_scene_to_file(next_scene)
-
-func _on_level_select_pressed() -> void:
-	Engine.time_scale = 1.0
-	get_tree().root.set_meta(LEVEL_PICKER_META, true)
-	var change_error := get_tree().change_scene_to_file(TITLE_SCREEN_PATH)
-	if change_error != OK:
-		get_tree().root.remove_meta(LEVEL_PICKER_META)
-		push_error("Could not return to level selection: " + str(change_error))
 
 func _lose(reason: String) -> void:
 	if state != "run":
@@ -1267,6 +1315,7 @@ func _lose(reason: String) -> void:
 	var why: String = {
 		"arrow hit": "An arrow got him.",
 		"hit an obstacle": "He slammed into a rock.",
+		"caught": "The hound ran him down.",
 		"fell from height": "He fell too far.",
 		"time ran out": "Time ran out.",
 	}.get(reason, reason)
@@ -1297,7 +1346,7 @@ func _win() -> void:
 	add_child(hug)
 	var st := _stars()
 	var car_line := " - Car: yes!" if used_car else ""
-	_show_end("YOU GOT THE BAG!", "Stars: %d/3 - Score: %d pts\nCoins: %d/%d%s" % [st, score, coins_got, coins_total, car_line], false, "res://demo/level_2.tscn")
+	_show_end("LEVEL 2 CLEAR!", "Stars: %d/3 - Score: %d pts\nCoins: %d/%d%s\nLevel 3 coming soon" % [st, score, coins_got, coins_total, car_line], false)
 	print("WIN: runner reached the gold score=%d stars=%d" % [score, st])
 
 # ---------- per-frame ----------
@@ -1312,6 +1361,22 @@ func _physics_process(dt: float) -> void:
 		_physics_ride(dt)
 	else:
 		_physics_run(dt)
+	if state != "run":
+		return
+	_physics_hound(dt)
+	if state != "run":
+		return
+	# hound spawns a few seconds in, well behind. --houndclose for tests.
+	if not hound_spawned and t >= 4.0:
+		hound_spawned = true
+		var gap := 120.0 if "--houndclose" in cli_args else HOUND_SPAWN_GAP
+		hound.global_position = Vector2(runner.global_position.x - gap, hound_base_y)
+		hound.visible = true
+		hound.play()
+		sfx_howl.volume_db = -8.0
+		sfx_howl.play()
+		_popup(hound.global_position + Vector2(-40, -100), "the hound!", Color(0.7, 0.15, 0.1))
+		print("HOUND: spawned gap=%.0f" % gap)
 	# pending car: he runs into a loop drawn far ahead, hops in on touch
 	if is_instance_valid(vehicle) and not riding:
 		if runner.global_position.distance_to(vehicle.global_position) < 140.0:
@@ -1399,6 +1464,57 @@ func _physics_run(dt: float) -> void:
 					if not runner.test_move(lifted, Vector2(6, 0)):
 						runner.global_position += up
 						break
+
+# ---------- the hound: gains from behind, chews ink, hops rocks ----------
+func _physics_hound(dt: float) -> void:
+	if not hound_spawned or not is_instance_valid(hound):
+		return
+	hound_pause = maxf(0.0, hound_pause - dt)
+	hound_bite_cd = maxf(0.0, hound_bite_cd - dt)
+	var chest := hound.global_position + Vector2(0, -40)
+	if hound_pause <= 0.0:
+		hound.global_position.x += HOUND_SPEED * dt
+		# hop rocks instead of clipping through them
+		var hop := -1.0
+		for r in rocks:
+			var rn = r["node"]
+			if is_instance_valid(rn):
+				var dx: float = absf((rn as Node2D).position.x - hound.global_position.x)
+				if dx < 130.0:
+					hop = 1.0 - dx / 130.0
+					break
+		if hop >= 0.0:
+			hound.global_position.y = hound_base_y - sin(hop * PI) * 70.0
+		else:
+			hound.global_position.y = hound_base_y
+		_spawn_dust(hound.global_position + Vector2(-20, -4), false)
+		# chews through his ink: each stroke costs it 2 seconds
+		for s in strokes.duplicate():
+			var line = s["line"]
+			if not is_instance_valid(line):
+				continue
+			var chewed := false
+			for i in range(line.get_point_count() - 1):
+				var ga: Vector2 = line.to_global(line.get_point_position(i))
+				var gb: Vector2 = line.to_global(line.get_point_position(i + 1))
+				if _pt_seg_dist(chest, ga, gb) < 26.0:
+					chewed = true
+					break
+			if chewed:
+				hound_pause = 2.0
+				_damage_stroke(s)
+				_add_score(25, chest + Vector2(-40, -60), "SLOWED +25")
+				sfx_board.play()
+				break
+	# the catch: teeth on him, or teeth in the hull. X-gap only: the hound
+	# runs lower than his chest, so full 2D distance never closes.
+	if absf(hound.global_position.x - runner.global_position.x) < HOUND_CATCH and not nodmg and invuln <= 0.0:
+		if riding:
+			if hound_bite_cd <= 0.0:
+				hound_bite_cd = 1.0
+				_damage_vehicle(1, runner.global_position + Vector2(-30, -60), "BITTEN -1")
+		else:
+			_lose("caught")
 
 func _assist_vehicle_ramp() -> bool:
 	if not is_instance_valid(vehicle) or vehicle.velocity.x <= 0.0:
@@ -1597,6 +1713,20 @@ func _process(dt: float) -> void:
 	# slow-mo ground truth: only while input is truly held, never leaks
 	var held := (Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) and not erasing) or Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT) or drawing or grabbing
 	Engine.time_scale = 0.45 if held else 1.0
+	# hound soundtrack + gap meter: closer howls are louder
+	if hound_spawned and is_instance_valid(hound):
+		howl_t -= dt
+		var gap := runner.global_position.x - hound.global_position.x
+		if howl_t <= 0.0:
+			howl_t = rng.randf_range(10.0, 16.0)
+			sfx_howl.volume_db = clampf(-22.0 + (600.0 - gap) * 0.03, -22.0, -6.0)
+			sfx_howl.pitch_scale = rng.randf_range(0.95, 1.05)
+			sfx_howl.play()
+		if gap < 900.0:
+			hud_hound.text = "HOUND %dm" % int(maxf(gap, 0.0) / 50.0)
+			hud_hound.add_theme_color_override("font_color", Color(0.7, 0.15, 0.1) if gap < 250.0 else INK)
+		else:
+			hud_hound.text = ""
 	# footsteps on the ground, alternating feet
 	if not riding and runner.is_on_floor() and absf(runner.velocity.x) > 100.0:
 		step_t += dt
@@ -1632,6 +1762,13 @@ func _process(dt: float) -> void:
 		add_child(loop)
 		_build_vehicle(loop)
 		print("AUTOCAR: riding=%s hp=%d" % [str(riding), veh_hp])
+	if "--chewtest" in cli_args and t >= 5.0 and strokes.is_empty() and hound_spawned:
+		var wl := Line2D.new()
+		var wx := hound.global_position.x + 30.0
+		wl.points = PackedVector2Array([Vector2(wx, GROUND_Y), Vector2(wx, GROUND_Y - 200.0)])
+		add_child(wl)
+		_seal_stroke(wl)
+		print("CHEWTEST: wall at %.0f" % wx)
 	if "--autoshield" in cli_args and t >= 1.0 and strokes.is_empty():
 		var sh := Line2D.new()
 		var sx := runner.global_position.x + 200.0
@@ -1783,7 +1920,7 @@ func _process(dt: float) -> void:
 
 func _exit_tree() -> void:
 	Engine.time_scale = 1.0
-	for player in [sfx_step, sfx_roll, sfx_wind, sfx_board, sfx_crash, sfx_coin, run_music]:
+	for player in [sfx_step, sfx_roll, sfx_wind, sfx_board, sfx_crash, sfx_coin, sfx_howl, run_music]:
 		if is_instance_valid(player):
 			player.stop()
 			player.stream = null
