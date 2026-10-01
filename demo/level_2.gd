@@ -131,12 +131,10 @@ var arrows: Array = []
 var rocks: Array = [] # each {node}
 var rock_timer := 4.0
 
-# hound state
-var hound: AnimatedSprite2D
-var hound_spawned := false
+# wolf pack: two chasers, each with its own chew-pause and bite cooldowns
+var hounds: Array = []
+var hound_frames: SpriteFrames
 var hound_base_y := 0.0
-var hound_pause := 0.0
-var hound_bite_cd := 0.0
 var howl_t := 8.0
 var hud_hound: Label
 var sfx_howl: AudioStreamPlayer
@@ -273,9 +271,11 @@ func _ready() -> void:
 	var ground := StaticBody2D.new()
 	ground.collision_layer = 1
 	ground.collision_mask = 0
-	ground.position = Vector2((gold_x + 2500.0) * 0.5, GROUND_Y + 6.0)
+	ground.position = Vector2((gold_x + 2500.0) * 0.5, GROUND_Y + 70.0)
 	var gshape := RectangleShape2D.new()
-	gshape.size = Vector2(gold_x + 3500.0, 12.0)
+	# thick slab with its top exactly on the ground line: a fast-falling
+	# hull cannot tunnel through it the way it could the old 12px strip.
+	gshape.size = Vector2(gold_x + 3500.0, 140.0)
 	var gcol := CollisionShape2D.new()
 	gcol.shape = gshape
 	ground.add_child(gcol)
@@ -316,7 +316,7 @@ func _ready() -> void:
 	runner.collision_layer = 1
 	runner.collision_mask = 1
 	runner.floor_snap_length = 10.0
-	runner.floor_max_angle = deg_to_rad(50.0)
+	runner.floor_max_angle = deg_to_rad(60.0)
 	var cap := CapsuleShape2D.new()
 	# feet-only: his head and arms pass under overhead strokes, so a shield
 	# drawn at head height blocks arrows but never wedges him. Low lines
@@ -346,7 +346,9 @@ func _ready() -> void:
 	ride_sprite = Sprite2D.new()
 	ride_sprite.texture = _cut("res://assets/stick-runner/rig/drive_seated.png")
 	ride_sprite.scale = Vector2(0.4, 0.4)
-	ride_sprite.position = Vector2(0, -79)
+	# seated art carries 96px of empty canvas under the ink: shift it down
+	# so the ink bottom (his butt) sits on the runner origin, on the hull.
+	ride_sprite.position = Vector2(-4, -41)
 	ride_sprite.visible = false
 	runner.add_child(ride_sprite)
 	add_child(runner)
@@ -360,19 +362,24 @@ func _ready() -> void:
 	shadow.color = Color(0.18, 0.17, 0.15, 0.20)
 	shadow.z_index = -2
 	add_child(shadow)
-	# the hound: hidden until it spawns a few seconds in
-	hound = AnimatedSprite2D.new()
-	hound.sprite_frames = _frames([
+	# wolf pack frames, shared by both chasers; they sprint in once the run starts
+	hound_frames = _frames([
 		"res://assets/predators/hound/cycle/f1_lunge_base.png",
 		"res://assets/predators/hound/cycle/f2_gallop_stretch.png",
 		"res://assets/predators/hound/cycle/f3_suspension_air.png",
 		"res://assets/predators/hound/cycle/f4_landing_reach.png",
 	], 9.0)
-	hound.scale = Vector2(-0.75, 0.75) # art faces left, he runs right
-	hound.visible = false
-	add_child(hound)
 	# Anchor the lowest opaque paw pixels to the floor, not the frame center.
-	hound_base_y = GROUND_Y - _sprite_bottom_offset(hound.sprite_frames, hound.scale.y)
+	hound_base_y = GROUND_Y - _sprite_bottom_offset(hound_frames, 0.75)
+	# the second wolf waits halfway down the run, not at the start line
+	var lurk := AnimatedSprite2D.new()
+	lurk.sprite_frames = hound_frames
+	lurk.scale = Vector2(-0.75, 0.75)
+	lurk.global_position = Vector2(gold_x * 0.5, hound_base_y)
+	add_child(lurk)
+	lurk.play()
+	hounds.append({"node": lurk, "pause": 0.0, "bite_cd": 0.0, "lurking": true, "charger": true})
+	print("WOLF 2: lurking at %.0f" % (gold_x * 0.5))
 	# sky platform (drops in as the runner closes in), high enough that
 	# even a tall car + rider passes under
 	block_tex = _cut("res://assets/obstacles/cut/block.png")
@@ -673,16 +680,68 @@ func _unhandled_input(event: InputEvent) -> void:
 			_eject_vehicle(true)
 
 func _seg_collider(a: Vector2, b: Vector2) -> CollisionShape2D:
-	var shape := RectangleShape2D.new()
-	# short end extension: just enough to hide the blunt end-cap at a
-	# ground junction. Long extensions turn curves into lumpy chords
-	# that snag him, so the glide assist below handles lips instead.
-	shape.size = Vector2(a.distance_to(b) + 20.0, 14.0)
+	# zero-thickness ink: a segment chain has no box corners, so a curve
+	# cannot grow the little lips that used to wall him on good drawings.
+	var shape := SegmentShape2D.new()
+	shape.a = a
+	shape.b = b
 	var col := CollisionShape2D.new()
 	col.shape = shape
-	col.position = (a + b) * 0.5
-	col.rotation = (b - a).angle()
 	return col
+
+func _chaikin_points(pts: PackedVector2Array) -> PackedVector2Array:
+	# two Chaikin passes: erase hand jitter and start-hooks while keeping
+	# the endpoints, so the run line stays where the player put it.
+	if pts.size() < 3:
+		return pts
+	var cur := pts
+	for _it in 2:
+		var out := PackedVector2Array()
+		out.append(cur[0])
+		for i in range(cur.size() - 1):
+			var a := cur[i]
+			var b := cur[i + 1]
+			out.append(a.lerp(b, 0.25))
+			out.append(a.lerp(b, 0.75))
+		out.append(cur[cur.size() - 1])
+		cur = out
+	return cur
+
+func _even_points(pts: PackedVector2Array, step: float) -> PackedVector2Array:
+	# even resample: kills the zigzag micro-segments (some near-vertical)
+	# that used to read as walls on an otherwise gentle hand curve.
+	var out := PackedVector2Array()
+	if pts.size() < 2:
+		return pts
+	out.append(pts[0])
+	var pos := pts[0]
+	var i := 1
+	while i < pts.size():
+		var target := pts[i]
+		var d := pos.distance_to(target)
+		if d < 0.001:
+			i += 1
+		elif d <= step:
+			pos = target
+			out.append(pos)
+			i += 1
+		else:
+			pos = pos + (target - pos) / d * step
+			out.append(pos)
+	if out.size() > 0 and out[out.size() - 1].distance_to(pts[pts.size() - 1]) > 0.01:
+		out.append(pts[pts.size() - 1])
+	return out
+
+func _rebuild_stroke_body(line: Line2D, body: StaticBody2D) -> void:
+	# the run line IS the collision: smooth, resample, then hang one thin
+	# segment per link. What he runs on is exactly what the player sees.
+	var smooth := _even_points(_chaikin_points(line.points), 12.0)
+	if smooth.size() >= 2:
+		line.points = smooth
+	for c in body.get_children():
+		c.queue_free()
+	for i in range(line.points.size() - 1):
+		body.add_child(_seg_collider(line.points[i], line.points[i + 1]))
 
 func _loop_stats(line: Line2D) -> Dictionary:
 	var n := line.get_point_count()
@@ -711,6 +770,7 @@ func _loop_stats(line: Line2D) -> Dictionary:
 
 func _register_stroke(line: Line2D, body: StaticBody2D) -> void:
 	strokes_sealed += 1
+	_rebuild_stroke_body(line, body)
 	var ls := _loop_stats(line)
 	if bool(ls.get("loop", false)) and not riding:
 		# closed loop on foot: it becomes a car, not a ramp
@@ -742,8 +802,6 @@ func _seal_stroke(line: Line2D) -> void:
 	var body := StaticBody2D.new()
 	body.collision_layer = 1
 	body.collision_mask = 0
-	for i in range(line.get_point_count() - 1):
-		body.add_child(_seg_collider(line.get_point_position(i), line.get_point_position(i + 1)))
 	add_child(body)
 	_register_stroke(line, body)
 
@@ -812,7 +870,9 @@ func _build_vehicle(line: Line2D) -> void:
 	veh_wheels.clear()
 	for sx in [-0.28, 0.28]:
 		var hub := Node2D.new()
-		hub.position = Vector2(w * sx, h * 0.5 - 4.0)
+		# hubs ride just above the sled contact line: only the tyre
+		# bottoms touch the ground instead of sinking into it.
+		hub.position = Vector2(w * sx, flat - 8.0)
 		var ring := Line2D.new()
 		var rp := PackedVector2Array()
 		for k in 13:
@@ -834,7 +894,9 @@ func _build_vehicle(line: Line2D) -> void:
 	veh_line = line
 	veh_hp = VEH_HP
 	veh_max = VEH_HP
-	veh_seat = Vector2(0, -h * 0.5 - 30.0)
+	# butt rests on the chassis top, inside the ring: he sits ON the
+	# car, not floating above it.
+	veh_seat = Vector2(0, flat - chassis_shape.size.y - 2.0)
 	veh_radius = maxf(w, h) * 0.5
 	veh_hit_cd = 0.5 # spawn grace: a loop drawn overlapping a rock settles first
 	veh_stop_t = 0.0
@@ -875,6 +937,9 @@ func _eject_vehicle(hop: bool, msg: String = "hop!") -> void:
 		riding = false
 		return
 	var seat_g: Vector2 = vehicle.to_global(veh_seat)
+	# snapshot BEFORE the hull is freed below: reading vehicle after
+	# vehicle = null was a use-after-free that hard-errored the eject.
+	var above := vehicle.global_position + Vector2(30, -(veh_radius + 90.0))
 	var xf: Transform2D = vehicle.global_transform
 	var local: PackedVector2Array = veh_line.points.duplicate()
 	# rebuild as an ordinary static stroke with leftover durability
@@ -904,9 +969,9 @@ func _eject_vehicle(hop: bool, msg: String = "hop!") -> void:
 	sfx_roll.volume_db = -60.0
 	if hop:
 		_popup(seat_g + Vector2(-30, -60), msg, INK)
-	# small dismount step, not a launch: a big toss is what used to throw
-	# him clean over his own car
-	_place_runner_at(seat_g + Vector2(0, -10), Vector2(120, -150) if hop else Vector2.ZERO)
+	# hop out ABOVE the hull: the seat now sits inside the ring, so
+	# dismounting at seat level would strand him inside his own car.
+	_place_runner_at(above, Vector2(120, -150) if hop else Vector2.ZERO)
 	invuln = 0.8
 
 func _break_vehicle(reason: String) -> void:
@@ -1315,7 +1380,7 @@ func _lose(reason: String) -> void:
 	var why: String = {
 		"arrow hit": "An arrow got him.",
 		"hit an obstacle": "He slammed into a rock.",
-		"caught": "The hound ran him down.",
+		"caught": "The wolves ran him down.",
 		"fell from height": "He fell too far.",
 		"time ran out": "Time ran out.",
 	}.get(reason, reason)
@@ -1366,24 +1431,45 @@ func _physics_process(dt: float) -> void:
 	_physics_hound(dt)
 	if state != "run":
 		return
-	# hound spawns a few seconds in, well behind. --houndclose for tests.
-	if not hound_spawned and t >= 4.0:
-		hound_spawned = true
+	# two wolves: the first sprints in early, the second ambushes from
+	# halfway down the run once he gets close. --houndclose for tests.
+	var active_wolves := 0
+	for hd in hounds:
+		if not bool(hd.get("lurking", false)):
+			active_wolves += 1
+	if active_wolves == 0 and t >= 4.0:
 		var gap := 120.0 if "--houndclose" in cli_args else HOUND_SPAWN_GAP
-		hound.global_position = Vector2(runner.global_position.x - gap, hound_base_y)
-		hound.visible = true
-		hound.play()
-		sfx_howl.volume_db = -8.0
-		sfx_howl.play()
-		_popup(hound.global_position + Vector2(-40, -100), "the hound!", Color(0.7, 0.15, 0.1))
-		print("HOUND: spawned gap=%.0f" % gap)
+		_spawn_hound(gap)
+	for hd in hounds:
+		if bool(hd.get("lurking", false)):
+			var hn := hd["node"] as AnimatedSprite2D
+			if is_instance_valid(hn) and runner.global_position.x >= hn.global_position.x - 700.0:
+				hd["lurking"] = false
+				sfx_howl.volume_db = -8.0
+				sfx_howl.play()
+				_popup(hn.global_position + Vector2(-40, -100), "another wolf!", Color(0.7, 0.15, 0.1))
+				print("WOLF 2: ambush!")
 	# pending car: he runs into a loop drawn far ahead, hops in on touch
 	if is_instance_valid(vehicle) and not riding:
 		if runner.global_position.distance_to(vehicle.global_position) < 140.0:
 			_board_vehicle()
 		elif vehicle.global_position.x < runner.global_position.x - 900.0:
 			_destroy_vehicle_silent()
-	if runner.global_position.x >= gold_x - 90.0:
+	# hard world bounds: leaving the screen is impossible, not just fatal.
+	# Landing kills still apply through peak_fall, so dying is allowed.
+	if riding and is_instance_valid(vehicle):
+		if vehicle.global_position.y > GROUND_Y + 24.0:
+			vehicle.global_position.y = GROUND_Y + 24.0
+			if vehicle.velocity.y > 0.0:
+				vehicle.velocity.y = 0.0
+		var seat_now: Vector2 = vehicle.to_global(veh_seat)
+		runner.global_position = seat_now
+	if runner.global_position.y > GROUND_Y + 24.0:
+		runner.global_position.y = GROUND_Y + 24.0
+		if runner.velocity.y > 0.0:
+			runner.velocity.y = 0.0
+	runner.global_position.x = maxf(runner.global_position.x, 20.0)
+	if runner.global_position.x >= gold_x - 90.0 and runner.global_position.y < GROUND_Y + 60.0:
 		_win()
 		return
 	if time_left <= 0.0:
@@ -1395,6 +1481,8 @@ func _physics_run(dt: float) -> void:
 	var on_floor_before := runner.is_on_floor()
 	runner.velocity.x = SPEED
 	runner.velocity.y += GRAV * dt
+	if runner.velocity.y > 1400.0:
+		runner.velocity.y = 1400.0
 	runner.move_and_slide()
 	# step-up assist: walled on the ground with a low surface above the feet
 	# (ramp foot floating slightly off the ground) -> lift onto it. Skipped
@@ -1412,10 +1500,10 @@ func _physics_run(dt: float) -> void:
 			walled_on_ink = true
 	if walled_on_ink:
 		var climbed := false
-		for i in range(40):
+		for i in range(60):
 			var up := Vector2(0, -(i + 1))
 			var lifted := runner.global_transform.translated(up)
-			if not runner.test_move(lifted, Vector2(4, 0)) and runner.test_move(lifted, Vector2(0, 44)):
+			if not runner.test_move(lifted, Vector2(6, 0)) and runner.test_move(lifted, Vector2(0, 48)):
 				runner.global_position += up
 				climbed = true
 				break
@@ -1423,20 +1511,31 @@ func _physics_run(dt: float) -> void:
 			_add_score(0, runner.global_position + Vector2(-30, -120), "")
 	# glide assist: walled on the ground against his own ink (or the ground)
 	# on a climbable face -> slide up along it so any drawn ramp or arch
-	# carries him. Faces steeper than 65 deg are still walls by design.
+	# carries him. Faces steeper than 72 deg are still walls by design.
 	if (runner.is_on_floor() or on_floor_before) and absf(runner.get_real_velocity().x) < 40.0:
 		for i in runner.get_slide_collision_count():
 			var sc := runner.get_slide_collision(i)
 			var collider := sc.get_collider()
 			if collider != null and (collider as Object).has_meta("kills"):
 				continue
-			if sc.get_normal().angle_to(Vector2.UP) < deg_to_rad(65.0):
+			if sc.get_normal().angle_to(Vector2.UP) < deg_to_rad(72.0):
 				var tang := Vector2(sc.get_normal().y, -sc.get_normal().x)
 				if tang.x < 0.0:
 					tang = -tang
 				if tang.y > -0.15:
 					tang.y = -0.35
-				runner.global_position += tang.normalized() * SPEED * 0.85 * dt
+				runner.global_position += tang.normalized() * SPEED * 1.0 * dt
+				break
+	# mantle guarantee: still walled on his own ink after the step-up and
+	# glide means some micro-lip reads as a wall, so climb it directly.
+	# Anything under ~120px tall is scrambled over on the spot; anything
+	# taller is visibly a wall, and only those can stop him now.
+	if walled_on_ink and runner.test_move(runner.global_transform, Vector2(8, 0)):
+		for mk in range(1, 121, 3):
+			var lifted := runner.global_transform.translated(Vector2(0, -mk))
+			if not runner.test_move(lifted, Vector2(8, 0)) and runner.test_move(lifted, Vector2(0, 130)):
+				runner.global_position += Vector2(0, -mk)
+				_spawn_dust(runner.global_position + Vector2(8, -2), false)
 				break
 	if not runner.is_on_floor():
 		was_air = true
@@ -1465,56 +1564,91 @@ func _physics_run(dt: float) -> void:
 						runner.global_position += up
 						break
 
-# ---------- the hound: gains from behind, chews ink, hops rocks ----------
+# ---------- the wolves: gain from behind, chew ink, hop rocks ----------
+func _spawn_hound(gap: float) -> void:
+	var h := AnimatedSprite2D.new()
+	h.sprite_frames = hound_frames
+	h.scale = Vector2(-0.75, 0.75) # art faces left, they run right
+	h.global_position = Vector2(runner.global_position.x - gap, hound_base_y)
+	add_child(h)
+	h.play()
+	hounds.append({"node": h, "pause": 0.0, "bite_cd": 0.0, "lurking": false, "charger": false})
+	sfx_howl.volume_db = -8.0
+	sfx_howl.play()
+	var msg := "a wolf!"
+	_popup(h.global_position + Vector2(-40, -100), msg, Color(0.7, 0.15, 0.1))
+	print("WOLF 1: spawned gap=%.0f" % gap)
+
 func _physics_hound(dt: float) -> void:
-	if not hound_spawned or not is_instance_valid(hound):
+	if hounds.is_empty():
 		return
-	hound_pause = maxf(0.0, hound_pause - dt)
-	hound_bite_cd = maxf(0.0, hound_bite_cd - dt)
-	var chest := hound.global_position + Vector2(0, -40)
-	if hound_pause <= 0.0:
-		hound.global_position.x += HOUND_SPEED * dt
-		# hop rocks instead of clipping through them
-		var hop := -1.0
-		for r in rocks:
-			var rn = r["node"]
-			if is_instance_valid(rn):
-				var dx: float = absf((rn as Node2D).position.x - hound.global_position.x)
-				if dx < 130.0:
-					hop = 1.0 - dx / 130.0
-					break
-		if hop >= 0.0:
-			hound.global_position.y = hound_base_y - sin(hop * PI) * 70.0
-		else:
-			hound.global_position.y = hound_base_y
-		_spawn_dust(hound.global_position + Vector2(-20, -4), false)
-		# chews through his ink: each stroke costs it 2 seconds
-		for s in strokes.duplicate():
-			var line = s["line"]
-			if not is_instance_valid(line):
+	var spent: Array = []
+	for hd in hounds:
+		if bool(hd.get("lurking", false)):
+			continue # still waiting deeper in the run
+		var h := hd["node"] as AnimatedSprite2D
+		if not is_instance_valid(h):
+			continue
+		hd["pause"] = maxf(0.0, float(hd["pause"]) - dt)
+		hd["bite_cd"] = maxf(0.0, float(hd["bite_cd"]) - dt)
+		var chest := h.global_position + Vector2(0, -40)
+		if float(hd["pause"]) <= 0.0:
+			# wolf 1 chases from behind; the ambusher charges left at him and
+			# keeps going once passed (despawned below, it was a single pass).
+			var dir := -1.0 if bool(hd.get("charger", false)) else 1.0
+			h.scale.x = -0.75 if dir > 0.0 else 0.75
+			h.global_position.x += dir * HOUND_SPEED * dt
+			if bool(hd.get("charger", false)) and h.global_position.x < runner.global_position.x - 900.0:
+				spent.append(hd)
+				h.queue_free()
+				print("WOLF 2: passed")
 				continue
-			var chewed := false
-			for i in range(line.get_point_count() - 1):
-				var ga: Vector2 = line.to_global(line.get_point_position(i))
-				var gb: Vector2 = line.to_global(line.get_point_position(i + 1))
-				if _pt_seg_dist(chest, ga, gb) < 26.0:
-					chewed = true
+			# hop rocks instead of clipping through them
+			var hop := -1.0
+			for r in rocks:
+				var rn = r["node"]
+				if is_instance_valid(rn):
+					var dx: float = absf((rn as Node2D).position.x - h.global_position.x)
+					if dx < 130.0:
+						hop = 1.0 - dx / 130.0
+						break
+			if hop >= 0.0:
+				h.global_position.y = hound_base_y - sin(hop * PI) * 70.0
+			else:
+				h.global_position.y = hound_base_y
+			_spawn_dust(h.global_position + Vector2(-20, -4), false)
+			# chews through his ink: each stroke costs it 2 seconds
+			for s in strokes.duplicate():
+				var line = s["line"]
+				if not is_instance_valid(line):
+					continue
+				var chewed := false
+				for i in range(line.get_point_count() - 1):
+					var ga: Vector2 = line.to_global(line.get_point_position(i))
+					var gb: Vector2 = line.to_global(line.get_point_position(i + 1))
+					if _pt_seg_dist(chest, ga, gb) < 26.0:
+						chewed = true
+						break
+				if chewed:
+					hd["pause"] = 2.0
+					_damage_stroke(s)
+					_add_score(25, chest + Vector2(-40, -60), "SLOWED +25")
+					sfx_board.play()
 					break
-			if chewed:
-				hound_pause = 2.0
-				_damage_stroke(s)
-				_add_score(25, chest + Vector2(-40, -60), "SLOWED +25")
-				sfx_board.play()
-				break
-	# the catch: teeth on him, or teeth in the hull. X-gap only: the hound
-	# runs lower than his chest, so full 2D distance never closes.
-	if absf(hound.global_position.x - runner.global_position.x) < HOUND_CATCH and not nodmg and invuln <= 0.0:
-		if riding:
-			if hound_bite_cd <= 0.0:
-				hound_bite_cd = 1.0
-				_damage_vehicle(1, runner.global_position + Vector2(-30, -60), "BITTEN -1")
-		else:
-			_lose("caught")
+		# the catch needs teeth ON him: close in X and roughly level in Y,
+		# so ramping clean over a wolf's head is a real evade.
+		var fdx := absf(h.global_position.x - runner.global_position.x)
+		var fdy := absf(h.global_position.y - runner.global_position.y)
+		if fdx < HOUND_CATCH and fdy < 110.0 and not nodmg and invuln <= 0.0:
+			if riding:
+				if float(hd["bite_cd"]) <= 0.0:
+					hd["bite_cd"] = 1.0
+					_damage_vehicle(1, runner.global_position + Vector2(-30, -60), "BITTEN -1")
+			else:
+				_lose("caught")
+				return
+	for d in spent:
+		hounds.erase(d)
 
 func _assist_vehicle_ramp() -> bool:
 	if not is_instance_valid(vehicle) or vehicle.velocity.x <= 0.0:
@@ -1610,6 +1744,8 @@ func _physics_ride(dt: float) -> void:
 		return
 	vehicle.velocity.x = move_toward(vehicle.velocity.x, VEH_SPEED, VEH_ACCEL * dt)
 	vehicle.velocity.y += GRAV * dt
+	if vehicle.velocity.y > 1400.0:
+		vehicle.velocity.y = 1400.0
 	if vehicle.is_on_floor() and vehicle.velocity.y > 0.0:
 		vehicle.velocity.y = 0.0
 	if not _assist_vehicle_ramp():
@@ -1713,17 +1849,23 @@ func _process(dt: float) -> void:
 	# slow-mo ground truth: only while input is truly held, never leaks
 	var held := (Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) and not erasing) or Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT) or drawing or grabbing
 	Engine.time_scale = 0.45 if held else 1.0
-	# hound soundtrack + gap meter: closer howls are louder
-	if hound_spawned and is_instance_valid(hound):
+	# wolf soundtrack + gap meter: closer howls are louder, nearest wolf counts
+	if not hounds.is_empty():
 		howl_t -= dt
-		var gap := runner.global_position.x - hound.global_position.x
+		var gap := INF
+		for hd in hounds:
+			if bool(hd.get("lurking", false)):
+				continue
+			var hn := hd["node"] as AnimatedSprite2D
+			if is_instance_valid(hn):
+				gap = minf(gap, absf(runner.global_position.x - hn.global_position.x))
 		if howl_t <= 0.0:
 			howl_t = rng.randf_range(10.0, 16.0)
 			sfx_howl.volume_db = clampf(-22.0 + (600.0 - gap) * 0.03, -22.0, -6.0)
 			sfx_howl.pitch_scale = rng.randf_range(0.95, 1.05)
 			sfx_howl.play()
 		if gap < 900.0:
-			hud_hound.text = "HOUND %dm" % int(maxf(gap, 0.0) / 50.0)
+			hud_hound.text = "WOLVES %dm" % int(maxf(gap, 0.0) / 50.0)
 			hud_hound.add_theme_color_override("font_color", Color(0.7, 0.15, 0.1) if gap < 250.0 else INK)
 		else:
 			hud_hound.text = ""
@@ -1762,9 +1904,14 @@ func _process(dt: float) -> void:
 		add_child(loop)
 		_build_vehicle(loop)
 		print("AUTOCAR: riding=%s hp=%d" % [str(riding), veh_hp])
-	if "--chewtest" in cli_args and t >= 5.0 and strokes.is_empty() and hound_spawned:
+	if "--chewtest" in cli_args and t >= 5.0 and strokes.is_empty() and not hounds.is_empty():
 		var wl := Line2D.new()
-		var wx := hound.global_position.x + 30.0
+		var hw0 := hounds[0]["node"] as AnimatedSprite2D
+		for hd in hounds:
+			if not bool(hd.get("lurking", false)):
+				hw0 = hd["node"] as AnimatedSprite2D
+				break
+		var wx := hw0.global_position.x + 30.0
 		wl.points = PackedVector2Array([Vector2(wx, GROUND_Y), Vector2(wx, GROUND_Y - 200.0)])
 		add_child(wl)
 		_seal_stroke(wl)
@@ -1788,6 +1935,14 @@ func _process(dt: float) -> void:
 		add_child(rp)
 		_seal_stroke(rp)
 		print("AUTORAMP55: strokes=%d" % strokes.size())
+	if "--autowall60" in cli_args and t >= 1.0 and strokes.is_empty():
+		# 90px vertical ink wall: unclimbable as a slope, must mantle over
+		var wl := Line2D.new()
+		var wx := runner.global_position.x + 150.0
+		wl.points = PackedVector2Array([Vector2(wx, GROUND_Y), Vector2(wx, GROUND_Y - 90.0)])
+		add_child(wl)
+		_seal_stroke(wl)
+		print("AUTOWALL60: strokes=%d" % strokes.size())
 	if "--autodraw" in cli_args and t >= 1.0 and strokes.is_empty():
 		var test := Line2D.new()
 		test.points = PackedVector2Array([Vector2(100, 300), Vector2(700, 300)])

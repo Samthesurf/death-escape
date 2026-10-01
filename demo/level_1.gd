@@ -239,9 +239,11 @@ func _ready() -> void:
 	var ground := StaticBody2D.new()
 	ground.collision_layer = 1
 	ground.collision_mask = 0
-	ground.position = Vector2((gold_x + 2500.0) * 0.5, GROUND_Y + 6.0)
+	ground.position = Vector2((gold_x + 2500.0) * 0.5, GROUND_Y + 70.0)
 	var gshape := RectangleShape2D.new()
-	gshape.size = Vector2(gold_x + 3500.0, 12.0)
+	# thick slab with its top exactly on the ground line: a fast-falling
+	# hull cannot tunnel through it the way it could the old 12px strip.
+	gshape.size = Vector2(gold_x + 3500.0, 140.0)
 	var gcol := CollisionShape2D.new()
 	gcol.shape = gshape
 	ground.add_child(gcol)
@@ -282,7 +284,7 @@ func _ready() -> void:
 	runner.collision_layer = 1
 	runner.collision_mask = 1
 	runner.floor_snap_length = 10.0
-	runner.floor_max_angle = deg_to_rad(50.0)
+	runner.floor_max_angle = deg_to_rad(60.0)
 	var cap := CapsuleShape2D.new()
 	# feet-only: his head and arms pass under overhead strokes, so a shield
 	# drawn at head height blocks arrows but never wedges him. Low lines
@@ -312,7 +314,9 @@ func _ready() -> void:
 	ride_sprite = Sprite2D.new()
 	ride_sprite.texture = _cut("res://assets/stick-runner/rig/drive_seated.png")
 	ride_sprite.scale = Vector2(0.4, 0.4)
-	ride_sprite.position = Vector2(0, -79)
+	# seated art carries 96px of empty canvas under the ink: shift it down
+	# so the ink bottom (his butt) sits on the runner origin, on the hull.
+	ride_sprite.position = Vector2(-4, -41)
 	ride_sprite.visible = false
 	runner.add_child(ride_sprite)
 	add_child(runner)
@@ -605,16 +609,68 @@ func _unhandled_input(event: InputEvent) -> void:
 			_eject_vehicle(true)
 
 func _seg_collider(a: Vector2, b: Vector2) -> CollisionShape2D:
-	var shape := RectangleShape2D.new()
-	# short end extension: just enough to hide the blunt end-cap at a
-	# ground junction. Long extensions turn curves into lumpy chords
-	# that snag him, so the glide assist below handles lips instead.
-	shape.size = Vector2(a.distance_to(b) + 20.0, 14.0)
+	# zero-thickness ink: a segment chain has no box corners, so a curve
+	# cannot grow the little lips that used to wall him on good drawings.
+	var shape := SegmentShape2D.new()
+	shape.a = a
+	shape.b = b
 	var col := CollisionShape2D.new()
 	col.shape = shape
-	col.position = (a + b) * 0.5
-	col.rotation = (b - a).angle()
 	return col
+
+func _chaikin_points(pts: PackedVector2Array) -> PackedVector2Array:
+	# two Chaikin passes: erase hand jitter and start-hooks while keeping
+	# the endpoints, so the run line stays where the player put it.
+	if pts.size() < 3:
+		return pts
+	var cur := pts
+	for _it in 2:
+		var out := PackedVector2Array()
+		out.append(cur[0])
+		for i in range(cur.size() - 1):
+			var a := cur[i]
+			var b := cur[i + 1]
+			out.append(a.lerp(b, 0.25))
+			out.append(a.lerp(b, 0.75))
+		out.append(cur[cur.size() - 1])
+		cur = out
+	return cur
+
+func _even_points(pts: PackedVector2Array, step: float) -> PackedVector2Array:
+	# even resample: kills the zigzag micro-segments (some near-vertical)
+	# that used to read as walls on an otherwise gentle hand curve.
+	var out := PackedVector2Array()
+	if pts.size() < 2:
+		return pts
+	out.append(pts[0])
+	var pos := pts[0]
+	var i := 1
+	while i < pts.size():
+		var target := pts[i]
+		var d := pos.distance_to(target)
+		if d < 0.001:
+			i += 1
+		elif d <= step:
+			pos = target
+			out.append(pos)
+			i += 1
+		else:
+			pos = pos + (target - pos) / d * step
+			out.append(pos)
+	if out.size() > 0 and out[out.size() - 1].distance_to(pts[pts.size() - 1]) > 0.01:
+		out.append(pts[pts.size() - 1])
+	return out
+
+func _rebuild_stroke_body(line: Line2D, body: StaticBody2D) -> void:
+	# the run line IS the collision: smooth, resample, then hang one thin
+	# segment per link. What he runs on is exactly what the player sees.
+	var smooth := _even_points(_chaikin_points(line.points), 12.0)
+	if smooth.size() >= 2:
+		line.points = smooth
+	for c in body.get_children():
+		c.queue_free()
+	for i in range(line.points.size() - 1):
+		body.add_child(_seg_collider(line.points[i], line.points[i + 1]))
 
 func _loop_stats(line: Line2D) -> Dictionary:
 	var n := line.get_point_count()
@@ -643,6 +699,7 @@ func _loop_stats(line: Line2D) -> Dictionary:
 
 func _register_stroke(line: Line2D, body: StaticBody2D) -> void:
 	strokes_sealed += 1
+	_rebuild_stroke_body(line, body)
 	var ls := _loop_stats(line)
 	if bool(ls.get("loop", false)) and not riding:
 		# closed loop on foot: it becomes a car, not a ramp
@@ -674,8 +731,6 @@ func _seal_stroke(line: Line2D) -> void:
 	var body := StaticBody2D.new()
 	body.collision_layer = 1
 	body.collision_mask = 0
-	for i in range(line.get_point_count() - 1):
-		body.add_child(_seg_collider(line.get_point_position(i), line.get_point_position(i + 1)))
 	add_child(body)
 	_register_stroke(line, body)
 
@@ -744,7 +799,9 @@ func _build_vehicle(line: Line2D) -> void:
 	veh_wheels.clear()
 	for sx in [-0.28, 0.28]:
 		var hub := Node2D.new()
-		hub.position = Vector2(w * sx, h * 0.5 - 4.0)
+		# hubs ride just above the sled contact line: only the tyre
+		# bottoms touch the ground instead of sinking into it.
+		hub.position = Vector2(w * sx, flat - 8.0)
 		var ring := Line2D.new()
 		var rp := PackedVector2Array()
 		for k in 13:
@@ -766,7 +823,9 @@ func _build_vehicle(line: Line2D) -> void:
 	veh_line = line
 	veh_hp = VEH_HP
 	veh_max = VEH_HP
-	veh_seat = Vector2(0, -h * 0.5 - 30.0)
+	# butt rests on the chassis top, inside the ring: he sits ON the
+	# car, not floating above it.
+	veh_seat = Vector2(0, flat - chassis_shape.size.y - 2.0)
 	veh_radius = maxf(w, h) * 0.5
 	veh_hit_cd = 0.5 # spawn grace: a loop drawn overlapping a rock settles first
 	veh_stop_t = 0.0
@@ -807,6 +866,9 @@ func _eject_vehicle(hop: bool, msg: String = "hop!") -> void:
 		riding = false
 		return
 	var seat_g: Vector2 = vehicle.to_global(veh_seat)
+	# snapshot BEFORE the hull is freed below: reading vehicle after
+	# vehicle = null was a use-after-free that hard-errored the eject.
+	var above := vehicle.global_position + Vector2(30, -(veh_radius + 90.0))
 	var xf: Transform2D = vehicle.global_transform
 	var local: PackedVector2Array = veh_line.points.duplicate()
 	# rebuild as an ordinary static stroke with leftover durability
@@ -836,9 +898,9 @@ func _eject_vehicle(hop: bool, msg: String = "hop!") -> void:
 	sfx_roll.volume_db = -60.0
 	if hop:
 		_popup(seat_g + Vector2(-30, -60), msg, INK)
-	# small dismount step, not a launch: a big toss is what used to throw
-	# him clean over his own car
-	_place_runner_at(seat_g + Vector2(0, -10), Vector2(120, -150) if hop else Vector2.ZERO)
+	# hop out ABOVE the hull: the seat now sits inside the ring, so
+	# dismounting at seat level would strand him inside his own car.
+	_place_runner_at(above, Vector2(120, -150) if hop else Vector2.ZERO)
 	invuln = 0.8
 
 func _break_vehicle(reason: String) -> void:
@@ -1318,7 +1380,21 @@ func _physics_process(dt: float) -> void:
 			_board_vehicle()
 		elif vehicle.global_position.x < runner.global_position.x - 900.0:
 			_destroy_vehicle_silent()
-	if runner.global_position.x >= gold_x - 90.0:
+	# hard world bounds: leaving the screen is impossible, not just fatal.
+	# Landing kills still apply through peak_fall, so dying is allowed.
+	if riding and is_instance_valid(vehicle):
+		if vehicle.global_position.y > GROUND_Y + 24.0:
+			vehicle.global_position.y = GROUND_Y + 24.0
+			if vehicle.velocity.y > 0.0:
+				vehicle.velocity.y = 0.0
+		var seat_now: Vector2 = vehicle.to_global(veh_seat)
+		runner.global_position = seat_now
+	if runner.global_position.y > GROUND_Y + 24.0:
+		runner.global_position.y = GROUND_Y + 24.0
+		if runner.velocity.y > 0.0:
+			runner.velocity.y = 0.0
+	runner.global_position.x = maxf(runner.global_position.x, 20.0)
+	if runner.global_position.x >= gold_x - 90.0 and runner.global_position.y < GROUND_Y + 60.0:
 		_win()
 		return
 	if time_left <= 0.0:
@@ -1330,6 +1406,8 @@ func _physics_run(dt: float) -> void:
 	var on_floor_before := runner.is_on_floor()
 	runner.velocity.x = SPEED
 	runner.velocity.y += GRAV * dt
+	if runner.velocity.y > 1400.0:
+		runner.velocity.y = 1400.0
 	runner.move_and_slide()
 	# step-up assist: walled on the ground with a low surface above the feet
 	# (ramp foot floating slightly off the ground) -> lift onto it. Skipped
@@ -1347,10 +1425,10 @@ func _physics_run(dt: float) -> void:
 			walled_on_ink = true
 	if walled_on_ink:
 		var climbed := false
-		for i in range(40):
+		for i in range(60):
 			var up := Vector2(0, -(i + 1))
 			var lifted := runner.global_transform.translated(up)
-			if not runner.test_move(lifted, Vector2(4, 0)) and runner.test_move(lifted, Vector2(0, 44)):
+			if not runner.test_move(lifted, Vector2(6, 0)) and runner.test_move(lifted, Vector2(0, 48)):
 				runner.global_position += up
 				climbed = true
 				break
@@ -1358,20 +1436,31 @@ func _physics_run(dt: float) -> void:
 			_add_score(0, runner.global_position + Vector2(-30, -120), "")
 	# glide assist: walled on the ground against his own ink (or the ground)
 	# on a climbable face -> slide up along it so any drawn ramp or arch
-	# carries him. Faces steeper than 65 deg are still walls by design.
+	# carries him. Faces steeper than 72 deg are still walls by design.
 	if (runner.is_on_floor() or on_floor_before) and absf(runner.get_real_velocity().x) < 40.0:
 		for i in runner.get_slide_collision_count():
 			var sc := runner.get_slide_collision(i)
 			var collider := sc.get_collider()
 			if collider != null and (collider as Object).has_meta("kills"):
 				continue
-			if sc.get_normal().angle_to(Vector2.UP) < deg_to_rad(65.0):
+			if sc.get_normal().angle_to(Vector2.UP) < deg_to_rad(72.0):
 				var tang := Vector2(sc.get_normal().y, -sc.get_normal().x)
 				if tang.x < 0.0:
 					tang = -tang
 				if tang.y > -0.15:
 					tang.y = -0.35
-				runner.global_position += tang.normalized() * SPEED * 0.85 * dt
+				runner.global_position += tang.normalized() * SPEED * 1.0 * dt
+				break
+	# mantle guarantee: still walled on his own ink after the step-up and
+	# glide means some micro-lip reads as a wall, so climb it directly.
+	# Anything under ~120px tall is scrambled over on the spot; anything
+	# taller is visibly a wall, and only those can stop him now.
+	if walled_on_ink and runner.test_move(runner.global_transform, Vector2(8, 0)):
+		for mk in range(1, 121, 3):
+			var lifted := runner.global_transform.translated(Vector2(0, -mk))
+			if not runner.test_move(lifted, Vector2(8, 0)) and runner.test_move(lifted, Vector2(0, 130)):
+				runner.global_position += Vector2(0, -mk)
+				_spawn_dust(runner.global_position + Vector2(8, -2), false)
 				break
 	if not runner.is_on_floor():
 		was_air = true
@@ -1494,6 +1583,8 @@ func _physics_ride(dt: float) -> void:
 		return
 	vehicle.velocity.x = move_toward(vehicle.velocity.x, VEH_SPEED, VEH_ACCEL * dt)
 	vehicle.velocity.y += GRAV * dt
+	if vehicle.velocity.y > 1400.0:
+		vehicle.velocity.y = 1400.0
 	if vehicle.is_on_floor() and vehicle.velocity.y > 0.0:
 		vehicle.velocity.y = 0.0
 	if not _assist_vehicle_ramp():
@@ -1651,6 +1742,14 @@ func _process(dt: float) -> void:
 		add_child(rp)
 		_seal_stroke(rp)
 		print("AUTORAMP55: strokes=%d" % strokes.size())
+	if "--autowall60" in cli_args and t >= 1.0 and strokes.is_empty():
+		# 90px vertical ink wall: unclimbable as a slope, must mantle over
+		var wl := Line2D.new()
+		var wx := runner.global_position.x + 150.0
+		wl.points = PackedVector2Array([Vector2(wx, GROUND_Y), Vector2(wx, GROUND_Y - 90.0)])
+		add_child(wl)
+		_seal_stroke(wl)
+		print("AUTOWALL60: strokes=%d" % strokes.size())
 	if "--autodraw" in cli_args and t >= 1.0 and strokes.is_empty():
 		var test := Line2D.new()
 		test.points = PackedVector2Array([Vector2(100, 300), Vector2(700, 300)])

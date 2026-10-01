@@ -218,7 +218,7 @@ func _build_title_page(page: Control) -> void:
 	_add_sparkle(page, Vector2(page_width * 0.84, page_height * 0.50), 10.0)
 	var left_doodle := _make_doodle_runner(page, Vector2(page_width * 0.26, page_height * 0.62), 0.46)
 	left_doodle.modulate = Color(1.0, 1.0, 1.0, 0.76)
-	var next_button := _make_button("TURN THE PAGE  ›", 29, true)
+	var next_button := _make_button("CONTINUE  ›", 29, true)
 	_place(next_button, 0.34, 0.79, 0.66, 0.91)
 	next_button.pressed.connect(_open_story_page)
 	page.add_child(next_button)
@@ -421,13 +421,14 @@ func _make_animated_runner(parent: Control, position: Vector2, scale: float) -> 
 	return character
 
 func _add_bubble_tail(page: Control) -> void:
+	# tail tip points LEFT toward Andre; the base hides under the bubble edge
 	var tail := Polygon2D.new()
-	tail.polygon = PackedVector2Array([Vector2(0, 0), Vector2(58, 26), Vector2(0, 58)])
-	tail.position = Vector2(page_width * 0.325, page_height * 0.53)
+	tail.polygon = PackedVector2Array([Vector2(58, 0), Vector2(0, 29), Vector2(58, 58)])
+	tail.position = Vector2(page_width * 0.36 - 58.0, page_height * 0.53)
 	tail.color = Color("fffdf7")
 	page.add_child(tail)
 	var outline := Line2D.new()
-	outline.points = PackedVector2Array([Vector2(0, 0), Vector2(58, 26), Vector2(0, 58)])
+	outline.points = PackedVector2Array([Vector2(58, 0), Vector2(0, 29), Vector2(58, 58)])
 	outline.position = tail.position
 	outline.width = 3.0
 	outline.default_color = INK
