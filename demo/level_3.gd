@@ -1,8 +1,6 @@
 extends Node2D
-## Level 2: the hound. Same run, but something gains on him from behind.
-## Drop walls to slow it (each stroke costs it 2 seconds), or outrun it
-## in a car. Rocks sit tighter, one archer still watches the middle.
-## Draw ramps (climb rocks), shields (block arrows, wear out), and CARS:
+## Level 3: shooters on TWO sky blocks + dive-bombing birds.
+## Draw ramps (climb rocks), shields (block bullets + birds, wear out), and CARS:
 ## a closed loop becomes a drivable hull. The stick hops in, drives it at
 ## ~320 px/s, and takes the hits in the hull instead of his chest.
 ## One rock / arrow / hard fall on foot = game over. In the car the hull
@@ -23,16 +21,20 @@ const GRAV := 1800.0
 const KILL_FALL := 1050.0
 const SPEED := 240.0
 const ARROW_SPEED := 520.0
+const BULLET_SPEED := 780.0
+const BULLET_GRAV := 60.0
 const RUNNER_X := 300.0
 const PLAT0 := 4500.0
-# tighter obstacle cadence than level 1; keep coins between challenge beats
-const ROCK_XS := [1800.0, 3400.0, 5000.0, 6600.0, 8200.0, 9800.0, 11400.0, 13000.0, 14600.0, 16200.0, 17800.0]
-const COIN_XS := [2600.0, 4200.0, 5800.0, 7400.0, 9000.0, 10600.0, 12200.0, 13800.0, 15400.0, 17000.0]
-
-# ---------- hound tuning: gains ~8px/s, catches a naked run at ~70s ----------
-const HOUND_SPEED := 248.0
-const HOUND_SPAWN_GAP := 560.0
-const HOUND_CATCH := 44.0
+const PLAT1 := 11500.0
+# denser than before: something to deal with every ~8s, coins fill the gaps
+const ROCK_XS := [2200.0, 4200.0, 6200.0, 8200.0, 10200.0, 12200.0, 14200.0, 16200.0]
+const COIN_XS := [3200.0, 5200.0, 7200.0, 9200.0, 11200.0, 13200.0, 15200.0]
+# birds: fast diving interceptors, angled to meet the running stick
+const BIRD_SPEED := 470.0
+const BIRD_SPAWN_AHEAD := 1000.0
+const BIRD_SPAWN_H := 140.0
+const BIRD_CD := 4.5
+const BIRD_CATCH := 38.0
 
 # ---------- car tuning ----------
 const LOOP_CLOSE_DIST := 60.0
@@ -119,25 +121,17 @@ var veh_peak := 0.0
 var veh_was_air := false
 
 var block_tex: Texture2D
-var plat: Node2D
-var plat_placed := false
-var plat_drop_t := -1.0
-var plat_rumbled := false
-var archer: AnimatedSprite2D
-var archer_cd := 3.0
-var archer_release_until := 0.0
-var arrows: Array = []
+var plats: Array = [] # each {node, placed, drop_t, rumbled, x}
+var shooters: Array = [] # each {node, cd, release_until}
+var bullets: Array = [] # faster-than-arrow gunfire
+var arrows: Array = [] # unused in level 3 (kept so shared code paths stay valid)
+var bird_frames: SpriteFrames
+var birds: Array = [] # each {node, vel}
+var bird_cd := 3.0
+var sfx_bird: AudioStreamPlayer
 
 var rocks: Array = [] # each {node}
 var rock_timer := 4.0
-
-# wolf pack: two chasers, each with its own chew-pause and bite cooldowns
-var hounds: Array = []
-var hound_frames: SpriteFrames
-var hound_base_y := 0.0
-var howl_t := 8.0
-var hud_hound: Label
-var sfx_howl: AudioStreamPlayer
 
 var gold: Sprite2D
 var gold_spawned := false
@@ -184,23 +178,6 @@ func _frames(paths: Array, fps: float) -> SpriteFrames:
 			continue
 		sf.add_frame("default", tex)
 	return sf
-
-func _sprite_bottom_offset(frames: SpriteFrames, scale_y: float) -> float:
-	var bottom_offset := 0.0
-	for frame_idx in frames.get_frame_count("default"):
-		var texture := frames.get_frame_texture("default", frame_idx)
-		if texture == null:
-			continue
-		var image := texture.get_image()
-		if image == null:
-			continue
-		var used := image.get_used_rect()
-		if used.size.y <= 0:
-			continue
-		var pixel_bottom := float(used.position.y + used.size.y)
-		var image_center_y := float(image.get_height()) * 0.5
-		bottom_offset = maxf(bottom_offset, (pixel_bottom - image_center_y) * scale_y)
-	return bottom_offset
 
 func _loop_wav(path: String) -> AudioStreamWAV:
 	var w := load(path) as AudioStreamWAV
@@ -362,47 +339,39 @@ func _ready() -> void:
 	shadow.color = Color(0.18, 0.17, 0.15, 0.20)
 	shadow.z_index = -2
 	add_child(shadow)
-	# wolf pack frames, shared by both chasers; they sprint in once the run starts
-	hound_frames = _frames([
-		"res://assets/predators/hound/cycle/f1_lunge_base.png",
-		"res://assets/predators/hound/cycle/f2_gallop_stretch.png",
-		"res://assets/predators/hound/cycle/f3_suspension_air.png",
-		"res://assets/predators/hound/cycle/f4_landing_reach.png",
-	], 9.0)
-	# Anchor the lowest opaque paw pixels to the floor, not the frame center.
-	hound_base_y = GROUND_Y - _sprite_bottom_offset(hound_frames, 0.75)
-	# the second wolf waits halfway down the run, not at the start line
-	var lurk := AnimatedSprite2D.new()
-	lurk.sprite_frames = hound_frames
-	lurk.scale = Vector2(-0.75, 0.75)
-	lurk.global_position = Vector2(gold_x * 0.5, hound_base_y)
-	add_child(lurk)
-	lurk.play()
-	hounds.append({"node": lurk, "pause": 0.0, "bite_cd": 0.0, "lurking": true, "charger": true})
-	print("WOLF 2: lurking at %.0f" % (gold_x * 0.5))
-	# sky platform (drops in as the runner closes in), high enough that
-	# even a tall car + rider passes under
+	# TWO sky blocks (level 3), high enough that even a tall car + rider passes under.
+	# Each drops in as the runner closes in and carries its own gunman.
 	block_tex = _cut("res://assets/obstacles/cut/block.png")
-	plat = Node2D.new()
-	plat.position.y = -420.0
-	add_child(plat)
-	var tile_w := float(block_tex.get_width()) * 0.18
-	for i in 3:
-		var tile := Sprite2D.new()
-		tile.texture = block_tex
-		tile.scale = Vector2(0.18, 0.18)
-		tile.position = Vector2(PLAT0 + tile_w * (float(i) + 0.5), 200.0)
-		plat.add_child(tile)
-	archer = AnimatedSprite2D.new()
-	archer.sprite_frames = _frames([
-		"res://assets/enemies/cut/archer_draw.png",
-		"res://assets/enemies/cut/archer_release.png",
-	], 2.0)
-	archer.scale = Vector2(0.45, 0.45)
-	archer.rotation = deg_to_rad(90.0) # start aiming down
-	archer.position = Vector2(PLAT0 + tile_w * 1.5, 200.0 - 39.0 - 58.0)
-	archer.play()
-	plat.add_child(archer)
+	for px in [PLAT0, PLAT1]:
+		var plat := Node2D.new()
+		plat.position.y = -420.0
+		add_child(plat)
+		var tile_w := float(block_tex.get_width()) * 0.18
+		for i in 3:
+			var tile := Sprite2D.new()
+			tile.texture = block_tex
+			tile.scale = Vector2(0.18, 0.18)
+			tile.position = Vector2(px + tile_w * (float(i) + 0.5), 200.0)
+			plat.add_child(tile)
+		var gunman := AnimatedSprite2D.new()
+		gunman.sprite_frames = _frames([
+			"res://assets/enemies/cut/gunman_aim.png",
+			"res://assets/enemies/cut/gunman_fire.png",
+		], 2.0)
+		gunman.scale = Vector2(0.45, 0.45)
+		gunman.rotation = deg_to_rad(90.0) # start aiming down
+		gunman.position = Vector2(px + tile_w * 1.5, 200.0 - 39.0 - 58.0)
+		gunman.play()
+		plat.add_child(gunman)
+		plats.append({"node": plat, "placed": false, "drop_t": -1.0, "rumbled": false, "x": px})
+		shooters.append({"node": gunman, "cd": 2.0 + float(shooters.size()) * 1.1, "release_until": 0.0})
+	# dive-bombing birds: flap frames shared by every attacker
+	bird_frames = _frames([
+		"res://assets/predators/bird/cycle_cut/f1_glide.png",
+		"res://assets/predators/bird/cycle_cut/f2_wings_up.png",
+		"res://assets/predators/bird/cycle_cut/f3_glide.png",
+		"res://assets/predators/bird/cycle_cut/f4_wings_down.png",
+	], 8.0)
 	# rocks sit in the world ahead; coins between them; gold waits at the end
 	for rx in ROCK_XS:
 		if rx < gold_x and not "--norocks" in cli_args:
@@ -425,7 +394,7 @@ func _ready() -> void:
 	sfx_board = _player(load("res://assets/sfx/board_thunk.wav") as AudioStream, -6.0)
 	sfx_crash = _player(load("res://assets/sfx/crash_break.wav") as AudioStream, -6.0)
 	sfx_coin = _player(load("res://assets/sfx/coin_blip.wav") as AudioStream, -8.0)
-	sfx_howl = _player(load("res://assets/sfx/wolf_howl.wav") as AudioStream, -12.0)
+	sfx_bird = _player(load("res://assets/sfx/bird_chirp.wav") as AudioStream, -10.0)
 	sfx_roll.play()
 	sfx_wind.play()
 	_start_run_music()
@@ -470,20 +439,8 @@ func _ready() -> void:
 	hud_prog_fill.position = Vector2(W * 0.5 - 150, 62)
 	hud_prog_fill.size = Vector2(4, 8)
 	ui.add_child(hud_prog_fill)
-	# hound gap meter, top right
-	hud_hound = Label.new()
-	hud_hound.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	hud_hound.add_theme_font_size_override("font_size", 26)
-	hud_hound.add_theme_color_override("font_color", INK)
-	hud_hound.anchor_left = 1.0
-	hud_hound.anchor_right = 1.0
-	hud_hound.offset_left = -260.0
-	hud_hound.offset_top = 10.0
-	hud_hound.offset_right = -16.0
-	hud_hound.text = ""
-	ui.add_child(hud_hound)
 	var hint := Label.new()
-	hint.text = "Draw ramps, LOOP = car. Erase removes one stroke. Clear All = C."
+	hint.text = "Draw: ramp, LOOP = car. Shields block bullets + birds. Erase = one stroke. Clear All = C."
 	hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	hint.add_theme_font_size_override("font_size", 18)
 	hint.add_theme_color_override("font_color", INK)
@@ -491,7 +448,7 @@ func _ready() -> void:
 	ui.add_child(hint)
 	# story card, fades after a few seconds
 	title_lbl = Label.new()
-	title_lbl.text = "The dogs smelled it. RUN."
+	title_lbl.text = "Snipers and talons. RUN."
 	title_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	title_lbl.add_theme_font_size_override("font_size", 52)
 	title_lbl.add_theme_color_override("font_color", INK)
@@ -537,7 +494,7 @@ func _ready() -> void:
 	restart_btn.custom_minimum_size = Vector2(100, 56)
 	restart_btn.pressed.connect(_on_restart_btn)
 	bar.add_child(restart_btn)
-	print("level2 ready: the hound is coming, survive %.0f seconds" % level_time)
+	print("level3 ready: 2 gunmen, birds, survive %.0f seconds" % level_time)
 
 func _on_move_toggle() -> void:
 	move_mode = move_btn.button_pressed
@@ -565,14 +522,6 @@ func _on_clear_btn() -> void:
 func _on_restart_btn() -> void:
 	Engine.time_scale = 1.0
 	get_tree().reload_current_scene()
-
-func _on_level_select_pressed() -> void:
-	Engine.time_scale = 1.0
-	get_tree().root.set_meta(LEVEL_PICKER_META, true)
-	var change_error := get_tree().change_scene_to_file(TITLE_SCREEN_PATH)
-	if change_error != OK:
-		get_tree().root.remove_meta(LEVEL_PICKER_META)
-		push_error("Could not return to level selection: " + str(change_error))
 
 # ---------- drawing: ramps + shields + cars, all with durability ----------
 func _unhandled_input(event: InputEvent) -> void:
@@ -1250,23 +1199,62 @@ func _spawn_coin(x: float) -> void:
 	add_child(c)
 	coins.append({"node": c, "base_y": c.position.y, "taken": false})
 
-# ---------- arrows ----------
+# ---------- bullets (faster than arrows) + diving birds ----------
 func _spawn_arrow(from: Vector2, target: Vector2) -> void:
+	_spawn_bullet(from, target)
+
+func _spawn_bullet(from: Vector2, target: Vector2) -> void:
 	var n := Node2D.new()
 	n.position = from
-	var shaft := Line2D.new()
-	shaft.points = PackedVector2Array([Vector2.ZERO, Vector2(34, 0)])
-	shaft.width = 3.0
-	shaft.default_color = INK
-	n.add_child(shaft)
-	var head := Polygon2D.new()
-	head.polygon = PackedVector2Array([Vector2(34, 0), Vector2(24, -6), Vector2(24, 6)])
-	head.color = INK
-	n.add_child(head)
-	var vel := (target - from).normalized() * ARROW_SPEED
+	var tracer := Line2D.new()
+	tracer.points = PackedVector2Array([Vector2.ZERO, Vector2(26, 0)])
+	tracer.width = 4.0
+	tracer.default_color = Color(0.7, 0.15, 0.1)
+	n.add_child(tracer)
+	var tip := Polygon2D.new()
+	tip.polygon = PackedVector2Array([Vector2(30, 0), Vector2(20, -5), Vector2(20, 5)])
+	tip.color = Color(0.7, 0.15, 0.1)
+	n.add_child(tip)
+	var dir := (target - from).normalized()
+	if dir.length() < 0.5:
+		dir = Vector2(-1, 0.3).normalized()
+	var vel := dir * BULLET_SPEED
 	n.rotation = vel.angle()
 	add_child(n)
-	arrows.append({"node": n, "vel": vel, "life": 6.0})
+	bullets.append({"node": n, "vel": vel, "life": 5.0})
+
+func _spawn_bird() -> void:
+	# Spawn ahead and above, aimed on a diving intercept course: lead the
+	# runner by his forward motion so the dive meets him instead of
+	# landing where he was. Fast enough (470px/s vs his 240) to close in.
+	var b := AnimatedSprite2D.new()
+	b.sprite_frames = bird_frames
+	b.scale = Vector2(0.55, 0.55)
+	var focus_x := runner.global_position.x
+	if riding and is_instance_valid(vehicle):
+		focus_x = vehicle.global_position.x
+	var spawn := Vector2(focus_x + BIRD_SPAWN_AHEAD + rng.randf_range(-80.0, 160.0), BIRD_SPAWN_H + rng.randf_range(-40.0, 80.0))
+	b.global_position = spawn
+	var chest: Vector2 = runner.global_position + Vector2(0, -65)
+	var closing := BIRD_SPAWN_AHEAD / BIRD_SPEED
+	var aim: Vector2 = chest + Vector2(SPEED * closing * 0.9, 0.0)
+	var dir := (aim - spawn).normalized()
+	if dir.length() < 0.5:
+		dir = Vector2(-0.85, 0.5).normalized()
+	# keep the dive honest: always forward-down, never flat or upward
+	if dir.x > -0.45:
+		dir.x = -0.45
+	if dir.y < 0.25:
+		dir.y = 0.25
+	dir = dir.normalized()
+	b.rotation = dir.angle() - PI * 0.5 + deg_to_rad(45.0)
+	add_child(b)
+	b.play()
+	birds.append({"node": b, "vel": dir * BIRD_SPEED})
+	if is_instance_valid(sfx_bird):
+		sfx_bird.pitch_scale = rng.randf_range(0.9, 1.15)
+		sfx_bird.play()
+	_popup(spawn + Vector2(-60, -30), "SKREE!", INK)
 
 # ---------- win / lose ----------
 # sad face in its own fixed box so it flows inside container layouts
@@ -1376,6 +1364,14 @@ func _on_next_btn(next_scene: String) -> void:
 	Engine.time_scale = 1.0
 	get_tree().change_scene_to_file(next_scene)
 
+func _on_level_select_pressed() -> void:
+	Engine.time_scale = 1.0
+	get_tree().root.set_meta(LEVEL_PICKER_META, true)
+	var change_error := get_tree().change_scene_to_file(TITLE_SCREEN_PATH)
+	if change_error != OK:
+		get_tree().root.remove_meta(LEVEL_PICKER_META)
+		push_error("Could not return to level selection: " + str(change_error))
+
 func _lose(reason: String) -> void:
 	if state != "run":
 		return
@@ -1391,8 +1387,9 @@ func _lose(reason: String) -> void:
 	print("LOSE: " + reason)
 	var why: String = {
 		"arrow hit": "An arrow got him.",
+		"bullet hit": "A gunman got him.",
+		"bird hit": "A bird took him down.",
 		"hit an obstacle": "He slammed into a rock.",
-		"caught": "The wolves ran him down.",
 		"fell from height": "He fell too far.",
 		"time ran out": "Time ran out.",
 	}.get(reason, reason)
@@ -1423,7 +1420,7 @@ func _win() -> void:
 	add_child(hug)
 	var st := _stars()
 	var car_line := " - Car: yes!" if used_car else ""
-	_show_end("LEVEL 2 CLEAR!", "Stars: %d/3 - Score: %d pts\nCoins: %d/%d%s" % [st, score, coins_got, coins_total, car_line], false, "res://demo/level_3.tscn")
+	_show_end("LEVEL 3 CLEAR!", "Stars: %d/3 - Score: %d pts\nCoins: %d/%d%s" % [st, score, coins_got, coins_total, car_line], false, "")
 	print("WIN: runner reached the gold score=%d stars=%d" % [score, st])
 
 # ---------- per-frame ----------
@@ -1438,29 +1435,6 @@ func _physics_process(dt: float) -> void:
 		_physics_ride(dt)
 	else:
 		_physics_run(dt)
-	if state != "run":
-		return
-	_physics_hound(dt)
-	if state != "run":
-		return
-	# two wolves: the first sprints in early, the second ambushes from
-	# halfway down the run once he gets close. --houndclose for tests.
-	var active_wolves := 0
-	for hd in hounds:
-		if not bool(hd.get("lurking", false)):
-			active_wolves += 1
-	if active_wolves == 0 and t >= 4.0:
-		var gap := 120.0 if "--houndclose" in cli_args else HOUND_SPAWN_GAP
-		_spawn_hound(gap)
-	for hd in hounds:
-		if bool(hd.get("lurking", false)):
-			var hn := hd["node"] as AnimatedSprite2D
-			if is_instance_valid(hn) and runner.global_position.x >= hn.global_position.x - 700.0:
-				hd["lurking"] = false
-				sfx_howl.volume_db = -8.0
-				sfx_howl.play()
-				_popup(hn.global_position + Vector2(-40, -100), "another wolf!", Color(0.7, 0.15, 0.1))
-				print("WOLF 2: ambush!")
 	# pending car: he runs into a loop drawn far ahead, hops in on touch
 	if is_instance_valid(vehicle) and not riding:
 		if runner.global_position.distance_to(vehicle.global_position) < 140.0:
@@ -1575,92 +1549,6 @@ func _physics_run(dt: float) -> void:
 					if not runner.test_move(lifted, Vector2(6, 0)):
 						runner.global_position += up
 						break
-
-# ---------- the wolves: gain from behind, chew ink, hop rocks ----------
-func _spawn_hound(gap: float) -> void:
-	var h := AnimatedSprite2D.new()
-	h.sprite_frames = hound_frames
-	h.scale = Vector2(-0.75, 0.75) # art faces left, they run right
-	h.global_position = Vector2(runner.global_position.x - gap, hound_base_y)
-	add_child(h)
-	h.play()
-	hounds.append({"node": h, "pause": 0.0, "bite_cd": 0.0, "lurking": false, "charger": false})
-	sfx_howl.volume_db = -8.0
-	sfx_howl.play()
-	var msg := "a wolf!"
-	_popup(h.global_position + Vector2(-40, -100), msg, Color(0.7, 0.15, 0.1))
-	print("WOLF 1: spawned gap=%.0f" % gap)
-
-func _physics_hound(dt: float) -> void:
-	if hounds.is_empty():
-		return
-	var spent: Array = []
-	for hd in hounds:
-		if bool(hd.get("lurking", false)):
-			continue # still waiting deeper in the run
-		var h := hd["node"] as AnimatedSprite2D
-		if not is_instance_valid(h):
-			continue
-		hd["pause"] = maxf(0.0, float(hd["pause"]) - dt)
-		hd["bite_cd"] = maxf(0.0, float(hd["bite_cd"]) - dt)
-		var chest := h.global_position + Vector2(0, -40)
-		if float(hd["pause"]) <= 0.0:
-			# wolf 1 chases from behind; the ambusher charges left at him and
-			# keeps going once passed (despawned below, it was a single pass).
-			var dir := -1.0 if bool(hd.get("charger", false)) else 1.0
-			h.scale.x = -0.75 if dir > 0.0 else 0.75
-			h.global_position.x += dir * HOUND_SPEED * dt
-			if bool(hd.get("charger", false)) and h.global_position.x < runner.global_position.x - 900.0:
-				spent.append(hd)
-				h.queue_free()
-				print("WOLF 2: passed")
-				continue
-			# hop rocks instead of clipping through them
-			var hop := -1.0
-			for r in rocks:
-				var rn = r["node"]
-				if is_instance_valid(rn):
-					var dx: float = absf((rn as Node2D).position.x - h.global_position.x)
-					if dx < 130.0:
-						hop = 1.0 - dx / 130.0
-						break
-			if hop >= 0.0:
-				h.global_position.y = hound_base_y - sin(hop * PI) * 70.0
-			else:
-				h.global_position.y = hound_base_y
-			_spawn_dust(h.global_position + Vector2(-20, -4), false)
-			# chews through his ink: each stroke costs it 2 seconds
-			for s in strokes.duplicate():
-				var line = s["line"]
-				if not is_instance_valid(line):
-					continue
-				var chewed := false
-				for i in range(line.get_point_count() - 1):
-					var ga: Vector2 = line.to_global(line.get_point_position(i))
-					var gb: Vector2 = line.to_global(line.get_point_position(i + 1))
-					if _pt_seg_dist(chest, ga, gb) < 26.0:
-						chewed = true
-						break
-				if chewed:
-					hd["pause"] = 2.0
-					_damage_stroke(s)
-					_add_score(25, chest + Vector2(-40, -60), "SLOWED +25")
-					sfx_board.play()
-					break
-		# the catch needs teeth ON him: close in X and roughly level in Y,
-		# so ramping clean over a wolf's head is a real evade.
-		var fdx := absf(h.global_position.x - runner.global_position.x)
-		var fdy := absf(h.global_position.y - runner.global_position.y)
-		if fdx < HOUND_CATCH and fdy < 110.0 and not nodmg and invuln <= 0.0:
-			if riding:
-				if float(hd["bite_cd"]) <= 0.0:
-					hd["bite_cd"] = 1.0
-					_damage_vehicle(1, runner.global_position + Vector2(-30, -60), "BITTEN -1")
-			else:
-				_lose("caught")
-				return
-	for d in spent:
-		hounds.erase(d)
 
 func _assist_vehicle_ramp() -> bool:
 	if not is_instance_valid(vehicle) or vehicle.velocity.x <= 0.0:
@@ -1861,26 +1749,6 @@ func _process(dt: float) -> void:
 	# slow-mo ground truth: only while input is truly held, never leaks
 	var held := (Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) and not erasing) or Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT) or drawing or grabbing
 	Engine.time_scale = 0.45 if held else 1.0
-	# wolf soundtrack + gap meter: closer howls are louder, nearest wolf counts
-	if not hounds.is_empty():
-		howl_t -= dt
-		var gap := INF
-		for hd in hounds:
-			if bool(hd.get("lurking", false)):
-				continue
-			var hn := hd["node"] as AnimatedSprite2D
-			if is_instance_valid(hn):
-				gap = minf(gap, absf(runner.global_position.x - hn.global_position.x))
-		if howl_t <= 0.0:
-			howl_t = rng.randf_range(10.0, 16.0)
-			sfx_howl.volume_db = clampf(-22.0 + (600.0 - gap) * 0.03, -22.0, -6.0)
-			sfx_howl.pitch_scale = rng.randf_range(0.95, 1.05)
-			sfx_howl.play()
-		if gap < 900.0:
-			hud_hound.text = "WOLVES %dm" % int(maxf(gap, 0.0) / 50.0)
-			hud_hound.add_theme_color_override("font_color", Color(0.7, 0.15, 0.1) if gap < 250.0 else INK)
-		else:
-			hud_hound.text = ""
 	# footsteps on the ground, alternating feet
 	if not riding and runner.is_on_floor() and absf(runner.velocity.x) > 100.0:
 		step_t += dt
@@ -1916,18 +1784,6 @@ func _process(dt: float) -> void:
 		add_child(loop)
 		_build_vehicle(loop)
 		print("AUTOCAR: riding=%s hp=%d" % [str(riding), veh_hp])
-	if "--chewtest" in cli_args and t >= 5.0 and strokes.is_empty() and not hounds.is_empty():
-		var wl := Line2D.new()
-		var hw0 := hounds[0]["node"] as AnimatedSprite2D
-		for hd in hounds:
-			if not bool(hd.get("lurking", false)):
-				hw0 = hd["node"] as AnimatedSprite2D
-				break
-		var wx := hw0.global_position.x + 30.0
-		wl.points = PackedVector2Array([Vector2(wx, GROUND_Y), Vector2(wx, GROUND_Y - 200.0)])
-		add_child(wl)
-		_seal_stroke(wl)
-		print("CHEWTEST: wall at %.0f" % wx)
 	if "--autoshield" in cli_args and t >= 1.0 and strokes.is_empty():
 		var sh := Line2D.new()
 		var sx := runner.global_position.x + 200.0
@@ -1966,45 +1822,63 @@ func _process(dt: float) -> void:
 	var ss := int(maxf(time_left, 0.0)) % 60
 	hud_timer.text = "%d:%02d" % [mm, ss]
 	hud_prog_fill.size.x = 300.0 * clampf(focus_x / gold_x, 0.0, 1.0)
-	# platform drops in as the runner closes in
-	if plat_drop_t < 0.0 and focus_x >= PLAT0 - 1100.0:
-		plat_drop_t = 0.0
-	if plat_drop_t >= 0.0 and not plat_placed:
-		plat_drop_t += dt
-		var u := clampf(plat_drop_t / 1.2, 0.0, 1.0)
-		plat.position.y = -420.0 * (1.0 - u * u)
-		if u >= 1.0:
-			plat_placed = true
-			if not plat_rumbled:
-				plat_rumbled = true
-				sfx_crash.volume_db = -18.0
-				sfx_crash.play()
-				sfx_crash.volume_db = -6.0
-	# archer senses runner, faces him, shoots down with drop-compensated aim
-	if plat_placed:
-		var ap := archer.global_position
+	# BOTH sky blocks drop in as the runner closes in
+	for pi in plats.size():
+		var pd: Dictionary = plats[pi]
+		var pnode := pd["node"] as Node2D
+		if not is_instance_valid(pnode):
+			continue
+		if float(pd["drop_t"]) < 0.0 and focus_x >= float(pd["x"]) - 1100.0:
+			pd["drop_t"] = 0.0
+		if float(pd["drop_t"]) >= 0.0 and not bool(pd["placed"]):
+			pd["drop_t"] = float(pd["drop_t"]) + dt
+			var u := clampf(float(pd["drop_t"]) / 1.2, 0.0, 1.0)
+			pnode.position.y = -420.0 * (1.0 - u * u)
+			if u >= 1.0:
+				pd["placed"] = true
+				if not bool(pd["rumbled"]):
+					pd["rumbled"] = true
+					sfx_crash.volume_db = -18.0
+					sfx_crash.play()
+					sfx_crash.volume_db = -6.0
+	# gunmen sense the runner, track him, and fire LEADED bullets faster than arrows
+	for si in shooters.size():
+		var sd: Dictionary = shooters[si]
+		var gun := sd["node"] as AnimatedSprite2D
+		if not is_instance_valid(gun):
+			continue
+		var pd: Dictionary = plats[si] if si < plats.size() else {}
+		if not bool(pd.get("placed", false)):
+			continue
+		var ap := gun.global_position
 		var rp := runner.global_position + Vector2(0, -65)
 		var to := rp - ap
-		if absf(to.x) < 800.0:
-			# bow tracks his chest exactly; the fired arrow leads him
+		if absf(to.x) < 900.0:
 			var want := clampf(to.angle(), deg_to_rad(5.0), deg_to_rad(175.0))
-			archer.rotation = lerp_angle(archer.rotation, want, 12.0 * dt)
-			archer_cd -= dt
-			if t > archer_release_until:
-				archer.frame = 0
-			if archer_cd <= 0.0:
-				archer_cd = 3.6
-				archer_release_until = t + 0.3
-				archer.frame = 1
+			gun.rotation = lerp_angle(gun.rotation, want, 12.0 * dt)
+			sd["cd"] = float(sd["cd"]) - dt
+			if t > float(sd["release_until"]):
+				gun.frame = 0
+			if float(sd["cd"]) <= 0.0:
+				sd["cd"] = rng.randf_range(2.0, 2.8)
+				sd["release_until"] = t + 0.3
+				gun.frame = 1
 				var dist := to.length()
-				var tof := dist / ARROW_SPEED
+				var tof := dist / BULLET_SPEED
 				var lead: Vector2 = rp + Vector2(SPEED * tof, 0.0)
-				tof = (lead - ap).length() / ARROW_SPEED
+				tof = (lead - ap).length() / BULLET_SPEED
 				lead = rp + Vector2(SPEED * tof, 0.0)
-				var aim: Vector2 = lead + Vector2(0, -0.5 * 160.0 * tof * tof)
-				_spawn_arrow(ap + Vector2(45, 0).rotated(archer.rotation), aim)
+				var aim: Vector2 = lead + Vector2(0, -0.5 * BULLET_GRAV * tof * tof)
+				_spawn_bullet(ap + Vector2(45, 0).rotated(gun.rotation), aim)
 				sfx_step.pitch_scale = 0.5
 				sfx_step.play()
+	# birds: timed dive-bombers that intercept the run line, not scenery
+	if not "--nobirds" in cli_args:
+		bird_cd -= dt
+		if bird_cd <= 0.0:
+			bird_cd = rng.randf_range(BIRD_CD - 1.0, BIRD_CD + 1.5)
+			if birds.size() < 3:
+				_spawn_bird()
 	# rocks are static; drop them once far behind the camera
 	for r in rocks.duplicate():
 		var n = r["node"]
@@ -2029,31 +1903,28 @@ func _process(dt: float) -> void:
 			coins_got += 1
 			sfx_coin.play()
 			_add_score(25, cnode.position + Vector2(-20, -30), "+25")
-	# arrows fly; the hull takes hits while riding, shields wear down on foot
-	for arrow in arrows.duplicate():
-		var n = arrow["node"]
+	# bullets fly flat and fast; the hull takes hits while riding, shields wear down on foot
+	for bullet in bullets.duplicate():
+		var n = bullet["node"]
 		if not is_instance_valid(n):
-			arrows.erase(arrow)
+			bullets.erase(bullet)
 			continue
-		var v: Vector2 = arrow["vel"]
-		v.y += 160.0 * dt
-		arrow["vel"] = v
-		arrow["life"] = float(arrow["life"]) - dt
+		var v: Vector2 = bullet["vel"]
+		v.y += BULLET_GRAV * dt
+		bullet["vel"] = v
+		bullet["life"] = float(bullet["life"]) - dt
 		n.position += v * dt
 		n.rotation = v.angle()
 		var done := false
 		if riding and is_instance_valid(vehicle):
 			if n.position.distance_to(vehicle.global_position) < veh_radius + 18.0:
 				_damage_vehicle(1, n.position + Vector2(-30, -20), "BLOCK +100")
-				if is_instance_valid(vehicle):
-					_add_score(100, n.position + Vector2(-30, -40), "")
-				else:
-					_add_score(100, n.position + Vector2(-30, -40), "")
+				_add_score(100, n.position + Vector2(-30, -40), "")
 				done = true
 		elif n.position.distance_to(runner.global_position + Vector2(0, -65)) < 34.0 and not nodmg and invuln <= 0.0:
-			_lose("arrow hit")
+			_lose("bullet hit")
 			return
-		# live line also blocks arrows; hits carry into its durability on release
+		# live line also blocks bullets; hits carry into its durability on release
 		if not done and drawing and cur_line != null and cur_line.get_point_count() > 1:
 			for i in range(cur_line.get_point_count() - 1):
 				var ca := cur_line.to_global(cur_line.get_point_position(i))
@@ -2063,6 +1934,8 @@ func _process(dt: float) -> void:
 					done = true
 					break
 		for s in strokes.duplicate():
+			if done:
+				break
 			var line = s["line"]
 			if not is_instance_valid(line):
 				continue
@@ -2074,20 +1947,66 @@ func _process(dt: float) -> void:
 					_add_score(100, n.position + Vector2(-40, -20), "BLOCK +100")
 					done = true
 					break
-			if done:
-				break
-		if not done and (n.position.y >= GROUND_Y - 4.0 or n.position.x < -60.0 or float(arrow["life"]) <= 0.0):
+		if not done and (n.position.y >= GROUND_Y - 4.0 or n.position.x < -60.0 or float(bullet["life"]) <= 0.0):
 			done = true
 		if done:
 			n.queue_free()
-			arrows.erase(arrow)
+			bullets.erase(bullet)
+	# birds dive on an intercept course; shields and the hull stop them, feet do not
+	for bird in birds.duplicate():
+		var bn = bird["node"] as AnimatedSprite2D
+		if not is_instance_valid(bn):
+			birds.erase(bird)
+			continue
+		var bv: Vector2 = bird["vel"]
+		bn.global_position += bv * dt
+		bn.rotation = bv.angle() - PI * 0.5 + deg_to_rad(45.0)
+		var bdone := false
+		# steer falling dives back onto the runner so every bird stays a threat
+		var chest := runner.global_position + Vector2(0, -65)
+		if bv.y > 0.0 and bn.global_position.y > chest.y - 40.0:
+			var want_dir: Vector2 = (chest + Vector2(SPEED * 0.35, 0.0) - bn.global_position).normalized()
+			if want_dir.x > -0.4:
+				want_dir.x = -0.4
+			bv = want_dir.normalized() * BIRD_SPEED
+			bird["vel"] = bv
+		if riding and is_instance_valid(vehicle):
+			if bn.global_position.distance_to(vehicle.global_position) < veh_radius + 22.0 and veh_hit_cd <= 0.0:
+				_damage_vehicle(1, bn.global_position + Vector2(-30, -30), "BIRD -1")
+				_add_score(100, bn.global_position + Vector2(-30, -50), "")
+				bdone = true
+		elif bn.global_position.distance_to(chest) < BIRD_CATCH and not nodmg and invuln <= 0.0:
+			_lose("bird hit")
+			return
+		if not bdone:
+			for s in strokes.duplicate():
+				var line = s["line"]
+				if not is_instance_valid(line):
+					continue
+				var hit_ink := false
+				for i in range(line.get_point_count() - 1):
+					var ga: Vector2 = line.to_global(line.get_point_position(i))
+					var gb: Vector2 = line.to_global(line.get_point_position(i + 1))
+					if _pt_seg_dist(bn.global_position, ga, gb) < 16.0:
+						hit_ink = true
+						break
+				if hit_ink:
+					_damage_stroke(s)
+					_add_score(100, bn.global_position + Vector2(-40, -20), "BLOCK +100")
+					bdone = true
+					break
+		if not bdone and (bn.global_position.y >= GROUND_Y - 6.0 or bn.global_position.x < runner.global_position.x - 700.0 or bn.global_position.x < -60.0):
+			bdone = true
+		if bdone:
+			bn.queue_free()
+			birds.erase(bird)
 	# gold bobs on the ground where it waits
 	if is_instance_valid(gold):
 		gold.position.y += sin(t * 2.0) * 2.0 * dt
 
 func _exit_tree() -> void:
 	Engine.time_scale = 1.0
-	for player in [sfx_step, sfx_roll, sfx_wind, sfx_board, sfx_crash, sfx_coin, sfx_howl, run_music]:
+	for player in [sfx_step, sfx_roll, sfx_wind, sfx_board, sfx_crash, sfx_coin, sfx_bird, run_music]:
 		if is_instance_valid(player):
 			player.stop()
 			player.stream = null

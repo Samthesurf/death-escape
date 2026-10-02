@@ -290,6 +290,7 @@ func _build_level_page(page: Control) -> void:
 	page.add_child(row)
 	row.add_child(_make_level_card("LEVEL 1", "The Getaway", "Learn the lines. Reach the bag.", GOLD, "res://demo/level_1.tscn"))
 	row.add_child(_make_level_card("LEVEL 2", "The Hound", "A closer chase. More hazards.", RUST, "res://demo/level_2.tscn"))
+	row.add_child(_make_level_card("LEVEL 3", "Snipers + Talons", "Gunmen above, birds that dive.", INK, "res://demo/level_3.tscn"))
 	var back_button := _make_button("‹  BACK", 25, false)
 	back_button.custom_minimum_size = Vector2(200.0, 64.0)
 	_place(back_button, 0.07, 0.84, 0.25, 0.94)
