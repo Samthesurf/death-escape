@@ -1235,19 +1235,23 @@ func _spawn_bird() -> void:
 		focus_x = vehicle.global_position.x
 	var spawn := Vector2(focus_x + BIRD_SPAWN_AHEAD + rng.randf_range(-80.0, 160.0), BIRD_SPAWN_H + rng.randf_range(-40.0, 80.0))
 	b.global_position = spawn
+	# Straight-line intercept on the original shallow glide: iterate the lead
+	# twice so the dive meets the runner instead of landing where he was.
 	var chest: Vector2 = runner.global_position + Vector2(0, -65)
-	var closing := BIRD_SPAWN_AHEAD / BIRD_SPEED
-	var aim: Vector2 = chest + Vector2(SPEED * closing * 0.9, 0.0)
-	var dir := (aim - spawn).normalized()
-	if dir.length() < 0.5:
-		dir = Vector2(-0.85, 0.5).normalized()
-	# keep the dive honest: always forward-down, never flat or upward
-	if dir.x > -0.45:
-		dir.x = -0.45
-	if dir.y < 0.25:
-		dir.y = 0.25
-	dir = dir.normalized()
-	b.rotation = dir.angle() - PI * 0.5 + deg_to_rad(45.0)
+	var tof := spawn.distance_to(chest) / BIRD_SPEED
+	var aim: Vector2 = chest + Vector2(SPEED * tof, 0.0)
+	tof = spawn.distance_to(aim) / BIRD_SPEED
+	aim = chest + Vector2(SPEED * tof, 0.0)
+	var raw: Vector2 = aim - spawn
+	var ang := PI - deg_to_rad(18.0)
+	if raw.length() > 1.0:
+		ang = raw.normalized().angle()
+	# The art is level-flight art (faces left, flaps horizontal): keep the
+	# glide shallow, 8-28 deg below horizontal, so the loop reads correctly.
+	ang = clampf(ang, PI - deg_to_rad(28.0), PI - deg_to_rad(8.0))
+	var dir := Vector2(cos(ang), sin(ang))
+	# art faces left, so forward (-X) is angle PI: unrotate to face travel
+	b.rotation = dir.angle() - PI
 	add_child(b)
 	b.play()
 	birds.append({"node": b, "vel": dir * BIRD_SPEED})
@@ -1960,16 +1964,9 @@ func _process(dt: float) -> void:
 			continue
 		var bv: Vector2 = bird["vel"]
 		bn.global_position += bv * dt
-		bn.rotation = bv.angle() - PI * 0.5 + deg_to_rad(45.0)
+		bn.rotation = bv.angle() - PI
 		var bdone := false
-		# steer falling dives back onto the runner so every bird stays a threat
 		var chest := runner.global_position + Vector2(0, -65)
-		if bv.y > 0.0 and bn.global_position.y > chest.y - 40.0:
-			var want_dir: Vector2 = (chest + Vector2(SPEED * 0.35, 0.0) - bn.global_position).normalized()
-			if want_dir.x > -0.4:
-				want_dir.x = -0.4
-			bv = want_dir.normalized() * BIRD_SPEED
-			bird["vel"] = bv
 		if riding and is_instance_valid(vehicle):
 			if bn.global_position.distance_to(vehicle.global_position) < veh_radius + 22.0 and veh_hit_cd <= 0.0:
 				_damage_vehicle(1, bn.global_position + Vector2(-30, -30), "BIRD -1")
