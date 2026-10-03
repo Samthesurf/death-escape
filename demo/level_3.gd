@@ -1206,15 +1206,27 @@ func _spawn_arrow(from: Vector2, target: Vector2) -> void:
 func _spawn_bullet(from: Vector2, target: Vector2) -> void:
 	var n := Node2D.new()
 	n.position = from
-	var tracer := Line2D.new()
-	tracer.points = PackedVector2Array([Vector2.ZERO, Vector2(26, 0)])
-	tracer.width = 4.0
-	tracer.default_color = Color(0.7, 0.15, 0.1)
-	n.add_child(tracer)
-	var tip := Polygon2D.new()
-	tip.polygon = PackedVector2Array([Vector2(30, 0), Vector2(20, -5), Vector2(20, 5)])
-	tip.color = Color(0.7, 0.15, 0.1)
-	n.add_child(tip)
+	# A bullet, not an arrow: stubby ink slug with motion streaks, no shaft, no head.
+	var slug := Polygon2D.new()
+	var pts := PackedVector2Array()
+	var bl := 9.0
+	var bw := 4.5
+	for k in 13:
+		var a := TAU * float(k) / 12.0
+		var ex := cos(a) * bl
+		var ey := sin(a) * bw
+		if ex < 0.0:
+			ex *= 0.55 # blunt tail, round nose
+		pts.append(Vector2(ex, ey))
+	slug.polygon = pts
+	slug.color = Color(0.7, 0.15, 0.1)
+	n.add_child(slug)
+	for off in [-4.0, 0.0, 4.0]:
+		var streak := Line2D.new()
+		streak.points = PackedVector2Array([Vector2(-bl - 4.0, off), Vector2(-bl - 18.0, off)])
+		streak.width = 2.0
+		streak.default_color = Color(0.7, 0.15, 0.1, 0.55)
+		n.add_child(streak)
 	var dir := (target - from).normalized()
 	if dir.length() < 0.5:
 		dir = Vector2(-1, 0.3).normalized()
